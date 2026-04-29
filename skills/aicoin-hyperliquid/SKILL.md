@@ -1,6 +1,6 @@
 ---
 name: aicoin-hyperliquid
-description: "This skill should be used when the user asks about Hyperliquid whale positions, Hyperliquid liquidations, Hyperliquid open interest, Hyperliquid trader analytics, Hyperliquid taker data, smart money on Hyperliquid, or any Hyperliquid-specific query. Use when user says: 'Hyperliquid whales', 'HL whale positions', 'HL liquidations', 'HL open interest', 'HL trader', 'smart money', 'Hyperliquid大户', 'HL鲸鱼', 'HL持仓', 'HL清算', 'HL持仓量', 'HL交易员'. **NOT supported in this skill**: HL funding rate (no endpoint exists — tell user to check https://app.hyperliquid.xyz directly, or use aicoin-market `coin.mjs funding_rate` for BTC central-exchange proxy). For general crypto prices/news, use aicoin-market. For exchange trading, use aicoin-trading. For Freqtrade, use aicoin-freqtrade."
+description: "This skill should be used when the user asks about Hyperliquid whale positions, Hyperliquid liquidations, Hyperliquid open interest, Hyperliquid trader analytics, Hyperliquid taker data, smart money on Hyperliquid, **HL funding rate / 资金费率** (via Info API, see types below), or any Hyperliquid-specific query. Use when user says: 'Hyperliquid whales', 'HL whale positions', 'HL liquidations', 'HL open interest', 'HL trader', 'smart money', 'Hyperliquid大户', 'HL鲸鱼', 'HL持仓', 'HL清算', 'HL持仓量', 'HL交易员', 'HL 资金费率', 'HL funding rate', 'HL funding history'. For general crypto prices/news, use aicoin-market. For exchange trading, use aicoin-trading. For Freqtrade, use aicoin-freqtrade."
 metadata: { "openclaw": { "primaryEnv": "AICOIN_ACCESS_KEY_ID", "requires": { "bins": ["node"] }, "homepage": "https://www.aicoin.com/opendata", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
 ---
 
@@ -155,10 +155,46 @@ Get at https://www.aicoin.com/opendata. See [Paid Feature Guide](#paid-feature-g
 #### Advanced
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
-| `info` | Info API | 免费版 | `{"type":"metaAndAssetCtxs"}` |
+| `info` | HL Info API 统一端点 (POST /api/upgrade/v2/hl/info) — 用 type 切不同子接口,见下方完整 types 表 | 免费版 | `{"type":"<type>","user":"<addr 可选>","extra_params":{<其它参数>}}` |
 | `smart_find` | Smart money discovery | 标准版 | `{}` |
 | `discover` | Trader discovery | 高级版 | `{}` |
 | `discover_history` | Historical discovery | 高级版 | `{"pageNum":1,"pageSize":20,"period":7}` Optional: `startTime`, `time`, `sort`, `coins`, `selects`, `filters` |
+
+#### `info` action 全部支持的 type (按 AiCoin 文档对齐, https://docs.aicoin.com/apis/hyperliquid#post-hl-info)
+
+| type | 说明 | 必填 |
+|---|---|---|
+| `meta` | 永续 universe 元数据 (asset list / 杠杆梯度) | — |
+| `spotMeta` | 现货元数据 | — |
+| `clearinghouseState` | 永续账户状态 (含 `cumFunding.allTime/sinceOpen/sinceChange` 累计资金费) | `user` |
+| `spotClearinghouseState` | 现货账户状态 | `user` |
+| `openOrders` | 用户挂单 | `user` |
+| `frontendOpenOrders` | 用户挂单 (前端格式) | `user` |
+| `userFees` | 用户手续费 | `user` |
+| `userFills` | 用户成交记录 | `user` |
+| `userFillsByTime` | 用户指定时间段成交 | `user` + `extra_params.startTime` |
+| `userFunding` | **用户资金费历史** (每 8h 一笔 funding 收支) | `user` + `extra_params.startTime` |
+| `userNonFundingLedgerUpdates` | 用户非资金费账本 | `user` + `extra_params.startTime` |
+| `historicalOrders` | 历史订单 | `user` |
+| `orderStatus` | 订单状态 | `user` + `extra_params.oid` |
+| `candleSnapshot` | K 线 | `extra_params.req={coin,interval,startTime,endTime}` |
+| `perpDexs` | 永续 DEX 列表 | — |
+| `allMids` | 所有 mid price | — |
+| `l2Book` | L2 订单簿 | `extra_params.coin` |
+| `portfolio` | 账户曲线 | `user` |
+| `webData2` | 综合用户数据 (资产、订单、成交聚合) | `user` |
+| `userTwapSliceFills` | TWAP 切片成交 | `user` |
+| `activeAssetData` | 单 asset 当前可用余额 / markPx / leverage | `user` + `extra_params.coin` |
+
+#### 关于 "BTC 资金费率" 这种问题
+
+AiCoin HL wrapper **没有公开全局"当前 funding rate per asset"endpoint**(如 HL 官方 `metaAndAssetCtxs` / `predictedFundings` AiCoin 都未透出). 能拿到的 funding 数据是:
+
+1. **per-user 历史** — `info {type:"userFunding", user:"0x...", extra_params:{startTime: <ms>}}` 拿用户每 8h 的 funding 收支记录
+2. **per-user 累计** — `info {type:"clearinghouseState", user:"0x..."}` 看 `cumFunding.allTime` 字段
+3. **不支持** — 当前刻的 BTC 永续 funding rate(每 8h 周期内的预测/实际值). 如果用户问"BTC 现在 funding rate", 直接告诉他: "AiCoin HL 接口没有全局当前 funding rate, 建议直接看 https://app.hyperliquid.xyz/trade/BTC 顶部 funding 显示, 或调用 HL 官方 https://api.hyperliquid.xyz/info type=metaAndAssetCtxs"
+
+**不要**: 看到没数据就说"AiCoin 不支持 HL", 也不要编一个数字. 必须明说哪条路能拿哪条路不能.
 
 ## Cross-Skill References
 
