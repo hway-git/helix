@@ -4,7 +4,7 @@ description: "Exchange account management: balance, positions, order history, re
 metadata: { "openclaw": { "primaryEnv": "AICOIN_ACCESS_KEY_ID", "requires": { "bins": ["node"] }, "homepage": "https://www.aicoin.com/opendata", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
 ---
 
-> **⚠️ 运行脚本: 必须先 cd 到本 SKILL.md 所在目录再执行。示例: `cd ~/.openclaw/workspace/skills/aicoin-account && node scripts/exchange.mjs ...`**
+> **运行脚本**: 从 SKILL.md 所在目录运行 `node scripts/<file>.mjs <action>`. 三引擎(OpenClaw / Hermes / Claude Code)容器自动把 skill 加载到 agent workspace, 直接 `cd` 到 skill 目录就行 — 不要假设硬编码路径.
 
 # AiCoin Account
 
@@ -52,7 +52,7 @@ When user wants to upgrade AiCoin data tier:
 
 ## Setup
 
-Exchange API keys in `.env` (auto-loaded from cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env`):
+交易所 API key 写到 `.env` 自动加载. **CoinClaw 容器里**直接在 web UI EnvSection 配置, 写入 `/workspace/.env` (Hermes/CC) 或 `/home/node/.openclaw/workspace/.env` (OpenClaw). **本地 host 模式**自动从 cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env` 加载.
 
 ```
 BINANCE_API_KEY=xxx
@@ -61,5 +61,7 @@ OKX_API_KEY=xxx
 OKX_API_SECRET=xxx
 OKX_PASSWORD=your-passphrase
 ```
+
+**敏感数据保护**: 永远不要在 chat 输出里 echo / cat / printenv 这些 key — 引导用户去 EnvSection 配置, 脚本内部读取不会泄漏到 agent 上下文.
 
 **Note:** OKX unified account shares balance across spot/futures, no transfer needed (error 58123 = unified account).

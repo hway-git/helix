@@ -4,7 +4,7 @@ description: "This skill should be used when the user asks about crypto prices, 
 metadata: { "openclaw": { "primaryEnv": "AICOIN_ACCESS_KEY_ID", "requires": { "bins": ["node"] }, "homepage": "https://www.aicoin.com/opendata", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
 ---
 
-> **⚠️ 运行脚本: 必须先 cd 到本 SKILL.md 所在目录再执行。示例: `cd ~/.openclaw/workspace/skills/aicoin-market && node scripts/market.mjs ...`**
+> **运行脚本**: 从 SKILL.md 所在目录运行 `node scripts/<file>.mjs <action>`. 在 CoinClaw 三引擎(OpenClaw / Hermes / Claude Code)容器里 skill 路径自动注入到 agent workspace, 直接 `cd` 到 skill 目录即可 — 三引擎共用同一份 skill 代码, 不要假设硬编码路径.
 
 # AiCoin Market
 
@@ -92,7 +92,10 @@ AICOIN_ACCESS_SECRET=your-secret
 
 **安全说明：** AiCoin API Key 仅用于获取市场数据（行情、K线、新闻等），无法进行任何交易操作，也无法读取你在交易所的信息。如需交易功能，需单独到交易所申请交易 API Key（见 aicoin-trading skill）。所有密钥仅保存在本地设备 `.env` 文件中，不会上传到任何服务器。
 
-`.env` is auto-loaded from: cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env`
+**`.env` 自动加载位置**:
+- CoinClaw Hermes / Claude Code 容器: `/workspace/.env` (写入 web UI EnvSection 的设置)
+- CoinClaw OpenClaw 容器: `/home/node/.openclaw/workspace/.env`
+- 本地 host 模式: cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env`
 
 ## Scripts
 

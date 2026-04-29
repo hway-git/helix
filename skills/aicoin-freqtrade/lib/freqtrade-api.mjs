@@ -1,16 +1,20 @@
 #!/usr/bin/env node
-// Freqtrade REST API client - shared helper
+// Freqtrade REST API client — shared helper.
+//
+// 在 CoinClaw 三引擎(OpenClaw / Hermes / Claude Code)容器里,
+// freqtrade 是 supervisord 管的常驻 daemon 跑在 :8080, Basic auth
+// 用户名 'freqtrade', 密码写在容器内的 .ft_api_pass 文件 (PVC 持久化).
+// 这个 helper 自动从那里读 — agent / skill 不需要在 .env 里再配
+// FREQTRADE_USERNAME / FREQTRADE_PASSWORD. 用户也可以通过 .env 覆盖.
+//
+// 在容器外(用户本地 macOS / Linux), 退到 .env 里读 — 走老的 host 模式,
+// ft-deploy.mjs deploy 时把 FREQTRADE_PASSWORD 写到 .env.
 import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { coinclawEnv, readFtApiPass, envFileCandidates } from './coinclaw-env.mjs';
 
-// Auto-load .env files (same logic as aicoin-api.mjs)
+// Auto-load .env files (CoinClaw 容器优先 /workspace/.env 或 OpenClaw 的等价路径).
 function loadEnv() {
-  const candidates = [
-    resolve(process.cwd(), '.env'),
-    resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env'),
-    resolve(process.env.HOME || '', '.openclaw', '.env'),
-  ];
-  for (const file of candidates) {
+  for (const file of envFileCandidates()) {
     if (!existsSync(file)) continue;
     try {
       for (const line of readFileSync(file, 'utf-8').split('\n')) {
@@ -28,9 +32,26 @@ function loadEnv() {
 }
 loadEnv();
 
-const BASE = process.env.FREQTRADE_URL || 'http://localhost:8080';
-const USER = process.env.FREQTRADE_USERNAME || 'freqtrader';
-const PASS = process.env.FREQTRADE_PASSWORD || '';
+const env = coinclawEnv();
+
+// 优先级有两条路径:
+//   - CoinClaw 容器内 (env 非空): 信 daemon 真实密码 (.ft_api_pass 文件
+//     + 容器 entrypoint 注入的 FT_API_USER), 完全忽略 .env 里的
+//     FREQTRADE_USERNAME/PASSWORD. 后者可能是早期 ft-deploy.mjs deploy
+//     流程 appendEnv 写的过时值, daemon 重启后密码会变, .env 没跟新 →
+//     401. 端到端测试在 OpenClaw pod 重现过这个 bug.
+//   - host 模式 (env=null): 信用户的 .env 配置, 因为本地 freqtrade 不是
+//     supervisord 管的, 没有 .ft_api_pass 文件这个权威来源.
+let BASE, USER, PASS;
+if (env) {
+  BASE = env.ftApiUrl;
+  USER = env.ftApiUser;
+  PASS = readFtApiPass(env) || '';
+} else {
+  BASE = process.env.FREQTRADE_URL || 'http://localhost:8080';
+  USER = process.env.FREQTRADE_USERNAME || 'freqtrade';
+  PASS = process.env.FREQTRADE_PASSWORD || '';
+}
 
 const auth = 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64');
 

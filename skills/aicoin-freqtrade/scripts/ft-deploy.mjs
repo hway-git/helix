@@ -1,22 +1,79 @@
 #!/usr/bin/env node
-// Freqtrade One-Click Deployment via git clone + setup.sh (official method)
-// Reads exchange keys from .env, creates config, starts as background process
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync } from 'node:fs';
+// ft-deploy.mjs — strategy lifecycle, backtest, hyperopt.
+//
+// 两套运行模式自动切换:
+//   - CoinClaw 容器内 (OpenClaw / Hermes / Claude Code): freqtrade 已是
+//     supervisord 管的常驻 daemon, 本脚本"部署策略" = 写策略文件 +
+//     改 config.strategy + 重启 daemon. 不再 git clone freqtrade,
+//     不再 nohup 后台进程, 不跟 daemon 抢 8080 端口.
+//   - host 模式 (用户本地 macOS / Linux): 沿用老路径, 自己 clone freqtrade,
+//     起后台进程, 写 PID file. 这条路在 coinclaw 之外仍然有效.
+//
+// coinclaw 模式下 strategy / backtest / 配置变更 都通过容器里预装的
+// freqtrade CLI + freqtrade REST API 完成, 跟 dashboard 看到的状态保持一致.
+import {
+  readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync,
+  readdirSync,
+} from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
+import {
+  coinclawEnv, hostModeFreqtradePaths, envFileCandidates, supervisorSocket,
+} from '../lib/coinclaw-env.mjs';
+import { ftGet, ftPost } from '../lib/freqtrade-api.mjs';
+import {
+  buildStrategyCode, SAMPLE_STRATEGY,
+  AVAILABLE_INDICATORS, AVAILABLE_AICOIN_DATA, PAID_DATA,
+} from '../lib/strategy-builder.mjs';
+
 const __dir = dirname(fileURLToPath(import.meta.url));
 
-// Load .env
+// ─── 模式 / 路径解析 ─────────────────────────────────────────────
+const ENV = coinclawEnv();
+const HOST = hostModeFreqtradePaths();
+
+// 三引擎下 STRAT_DIR / USER_DATA / CONFIG_PATH 直接来自 daemon 启动参数,
+// 跟 dashboard / freqtrade /api/v1/show_config 保持完全一致 — 不会出现
+// "agent 写到 ~/.freqtrade/user_data/strategies/ 但 daemon 不读" 这种坑.
+const STRAT_DIR  = ENV ? ENV.strategyPath      : HOST.strategyPath;
+const USER_DATA  = ENV ? ENV.freqtradeUserdir  : HOST.userdir;
+const CONFIG_PATH = ENV ? ENV.configPath       : HOST.configPath;
+const ENV_FILE   = ENV ? ENV.envFile           : envFileCandidates()[1];
+
+// FT_BIN 解析顺序:
+//   1. coinclaw 容器: 'freqtrade' — image PATH 上已经有 (entrypoint
+//      ENV PATH 包含 /home/node/.freqtrade/source/.venv/bin 或者
+//      ftuser 的 ~/.local/bin), 直接用最干净.
+//   2. host 模式优先 `command -v freqtrade` — 用户本地已经装过的
+//      系统 freqtrade (brew / uv / 系统包) 直接复用. 老版本 ft-deploy
+//      会 git clone freqtrade 重装一次 setup.sh, 多等几分钟 + 多占
+//      ~500MB. 见 commit 50011b8.
+//   3. host fallback: ~/.freqtrade/source/.venv/bin/freqtrade — 真
+//      没有时才走 setup.sh 装到 venv.
+const FT_BIN = ENV ? 'freqtrade' : (() => {
+  try {
+    const sys = execSync('command -v freqtrade', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (sys && existsSync(sys)) return sys;
+  } catch {}
+  return HOST.ftBin;
+})();
+
+// ─── 通用辅助 ─────────────────────────────────────────────────────
+function run(cmd, opts = {}) {
+  return execSync(cmd, { encoding: 'utf-8', timeout: 600000, ...opts }).trim();
+}
+
+function hasCommand(cmd) {
+  try { run(`which ${cmd}`); return true; } catch { return false; }
+}
+
+// 轻量 env 读取 — freqtrade-api.mjs 已经 loadEnv() 一次, 这里是为了 host
+// 模式下的 detectExchange / appendEnv 等动作能拿到最新值.
 function loadEnv() {
-  const candidates = [
-    resolve(process.cwd(), '.env'),
-    resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env'),
-    resolve(process.env.HOME || '', '.openclaw', '.env'),
-  ];
-  for (const file of candidates) {
+  for (const file of envFileCandidates()) {
     if (!existsSync(file)) continue;
     try {
       for (const line of readFileSync(file, 'utf-8').split('\n')) {
@@ -34,45 +91,93 @@ function loadEnv() {
 }
 loadEnv();
 
-const FT_DIR = resolve(process.env.HOME || '', '.freqtrade');
-const SRC_DIR = resolve(FT_DIR, 'source');
-const VENV_DIR = resolve(SRC_DIR, '.venv');
-const USER_DATA = resolve(FT_DIR, 'user_data');
-const STRAT_DIR = resolve(USER_DATA, 'strategies');
-const CONFIG_PATH = resolve(USER_DATA, 'config.json');
-const PID_FILE = resolve(FT_DIR, 'freqtrade.pid');
-const LOG_FILE = resolve(FT_DIR, 'freqtrade.log');
-const API_PORT = process.env.FREQTRADE_PORT || '8080';
-const ENV_FILE = resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env');
+function appendEnv(key, val) {
+  if (!existsSync(ENV_FILE)) {
+    writeFileSync(ENV_FILE, `${key}=${val}\n`);
+    return;
+  }
+  const content = readFileSync(ENV_FILE, 'utf-8');
+  const lines = content.split('\n');
+  const idx = lines.findIndex((l) => l.trim().startsWith(`${key}=`));
+  if (idx >= 0) {
+    lines[idx] = `${key}=${val}`;
+    writeFileSync(ENV_FILE, lines.join('\n'));
+  } else {
+    writeFileSync(ENV_FILE, content.trimEnd() + `\n${key}=${val}\n`);
+  }
+}
 
-// Prefer a freqtrade that's already on PATH (e.g. Hermes / Claude Code
-// pods inherit it from the freqtradeorg/freqtrade:stable base image at
-// /home/ftuser/.local/bin/freqtrade). Without this, every user pod
-// reinstalls freqtrade into $HOME/.freqtrade/source/.venv by cloning the
-// upstream repo and running setup.sh — burns several minutes and ~500MB
-// of disk per user, duplicating what the image already ships.
-// Fall back to the venv path for local laptops without a system install,
-// so the setup.sh code path still works there.
-const FT_BIN = (() => {
+// 在三引擎容器里 .env 同时承载交易所 key + AiCoin key + DRY_RUN +
+// SELECTED_EXCHANGE, agent 直接告诉用户去 EnvSection 改, 不在脚本里写.
+// host 模式下沿用老的"自己 nohup freqtrade"流程, 才需要这个 detectExchange.
+function detectExchange() {
+  const exchanges = ['BINANCE', 'OKX', 'BYBIT', 'BITGET', 'GATE', 'HTX', 'KUCOIN', 'MEXC'];
+  for (const ex of exchanges) {
+    if (process.env[`${ex}_API_KEY`] && process.env[`${ex}_API_SECRET`]) {
+      return {
+        name: ex.toLowerCase(),
+        key: process.env[`${ex}_API_KEY`],
+        secret: process.env[`${ex}_API_SECRET`],
+        password: process.env[`${ex}_PASSWORD`] || '',
+      };
+    }
+  }
+  return null;
+}
+
+// ─── coinclaw 模式: daemon 操作 ──────────────────────────────────
+function readDaemonConfig() {
+  return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+}
+
+function writeDaemonConfig(cfg) {
+  copyFileSync(CONFIG_PATH, `${CONFIG_PATH}.bak`);
+  const tmp = `${CONFIG_PATH}.tmp.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(cfg, null, 4) + '\n');
+  execSync(`mv ${JSON.stringify(tmp)} ${JSON.stringify(CONFIG_PATH)}`);
+}
+
+function restartDaemon() {
+  if (!ENV) throw new Error('restart daemon 仅在 coinclaw 容器内可用');
+  const sock = supervisorSocket();
   try {
-    const sys = execSync('command -v freqtrade', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    if (sys && existsSync(sys)) return sys;
-  } catch {}
-  return resolve(VENV_DIR, 'bin', 'freqtrade');
-})();
-
-function run(cmd, opts = {}) {
-  return execSync(cmd, { encoding: 'utf-8', timeout: 600000, ...opts }).trim();
+    execSync(`supervisorctl -s unix://${sock} restart freqtrade`, {
+      stdio: 'pipe', timeout: 30000,
+    });
+    return { method: 'supervisorctl' };
+  } catch (e) {
+    try {
+      const pid = run("pgrep -f 'freqtrade trade' | head -n1");
+      if (pid) {
+        process.kill(Number(pid), 'SIGTERM');
+        return { method: 'kill+autorestart', pid: Number(pid) };
+      }
+    } catch {}
+    throw new Error(`restart 失败: ${e.message}`);
+  }
 }
 
-function hasCommand(cmd) {
-  try { run(`which ${cmd}`); return true; } catch { return false; }
+// 通过 dump+grep ps 拿 daemon 当前用的 strategy / pair_whitelist 等运行
+// 时配置. /api/v1/show_config 是最稳的来源, 跟 freqtrade UI/dashboard 一致.
+async function fetchDaemonState() {
+  try {
+    const cfg = await ftGet('show_config');
+    return { online: true, ...cfg };
+  } catch (e) {
+    return { online: false, error: e.message };
+  }
 }
 
-// Find the best Python >= 3.11 (Freqtrade requirement)
+// ─── host 模式: 自己管 freqtrade 进程 ───────────────────────────
+function getHostPid() {
+  if (!HOST.pidFile || !existsSync(HOST.pidFile)) return null;
+  const pid = readFileSync(HOST.pidFile, 'utf-8').trim();
+  if (!pid) return null;
+  try { process.kill(Number(pid), 0); return Number(pid); } catch { return null; }
+}
+
 function findPython() {
   const names = ['python3.13', 'python3.12', 'python3.11', 'python3'];
-  // Also check well-known paths that may not be in OpenClaw's PATH
   const extraDirs = ['/opt/homebrew/bin', '/usr/local/bin', `${process.env.HOME}/.local/bin`];
   const candidates = [...names];
   for (const dir of extraDirs) {
@@ -83,7 +188,7 @@ function findPython() {
       const version = run(`${bin} --version`);
       const match = version.match(/(\d+)\.(\d+)/);
       if (match) {
-        const major = Number(match[1]), minor = Number(match[2]);
+        const major = Number(match[1]); const minor = Number(match[2]);
         if (major === 3 && minor >= 11) return { bin, major, minor, version };
       }
     } catch {}
@@ -91,14 +196,11 @@ function findPython() {
   return null;
 }
 
-// Ensure Python 3.11+ is available (Freqtrade requirement)
 function ensureModernPython() {
   let py = findPython();
   if (py) return py;
 
-  // No Python 3.11+ found — try to install
   if (process.platform === 'darwin') {
-    // Strategy 1: uv — downloads pre-built Python, works on all macOS versions
     try {
       const uvBin = resolve(process.env.HOME || '', '.local', 'bin', 'uv');
       if (!existsSync(uvBin)) {
@@ -121,7 +223,6 @@ function ensureModernPython() {
       }
     } catch (e) { console.error(`uv: ${e.message}`); }
 
-    // Strategy 2: brew (may fail on newer macOS)
     try {
       if (hasCommand('brew')) {
         console.error('Trying brew install python@3.12...');
@@ -136,24 +237,7 @@ function ensureModernPython() {
   throw new Error('Python 3.11+ required. Install options:\n• curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.12\n• brew install python@3.12\n• https://www.python.org/downloads/');
 }
 
-// ─── Exchange & config ───
-
-function detectExchange() {
-  const exchanges = ['BINANCE', 'OKX', 'BYBIT', 'BITGET', 'GATE', 'HTX', 'KUCOIN', 'MEXC'];
-  for (const ex of exchanges) {
-    if (process.env[`${ex}_API_KEY`] && process.env[`${ex}_API_SECRET`]) {
-      return {
-        name: ex.toLowerCase(),
-        key: process.env[`${ex}_API_KEY`],
-        secret: process.env[`${ex}_API_SECRET`],
-        password: process.env[`${ex}_PASSWORD`] || '',
-      };
-    }
-  }
-  return null;
-}
-
-function generateConfig(exchangeInfo, apiPassword, params = {}) {
+function generateHostConfig(exchangeInfo, apiPassword, params = {}) {
   const config = {
     trading_mode: params.trading_mode || 'futures',
     margin_mode: params.margin_mode || 'isolated',
@@ -180,12 +264,14 @@ function generateConfig(exchangeInfo, apiPassword, params = {}) {
     api_server: {
       enabled: true,
       listen_ip_address: '127.0.0.1',
-      listen_port: Number(API_PORT),
+      listen_port: 8080,
       verbosity: 'error',
       enable_openapi: false,
       jwt_secret_key: randomBytes(16).toString('hex'),
       CORS_origins: [],
-      username: 'freqtrader',
+      // freqtrade 三引擎容器里 daemon user 都是 'freqtrade', host 模式跟齐 —
+      // 老版本默认 'freqtrader' 跟容器不一致, 历史 bug.
+      username: 'freqtrade',
       password: apiPassword,
     },
     bot_name: 'aicoin-freqtrade',
@@ -197,67 +283,91 @@ function generateConfig(exchangeInfo, apiPassword, params = {}) {
   if (proxyUrl) {
     config.exchange.ccxt_config.proxies = { https: proxyUrl, http: proxyUrl };
     config.exchange.ccxt_async_config.aiohttp_proxy = proxyUrl;
-    // HTTP proxies don't support WebSocket — disable WS to force REST polling
     config.exchange.enable_ws = false;
   }
   return config;
 }
 
-function appendEnv(key, val) {
-  if (!existsSync(ENV_FILE)) {
-    writeFileSync(ENV_FILE, `${key}=${val}\n`);
-    return;
+// ─── 公共: 复制 AiCoin SDK + 模板策略到 strategy 目录 ────────────
+// 三引擎容器 image 已经在 build time 把 aicoin_data.py 复制到了 strategy
+// 目录(image-*/Dockerfile + image/Dockerfile), 所以 coinclaw 模式下这一步
+// 是幂等的 no-op, 但留着保证 host 模式 + agent 第一次 create_strategy 时
+// 能拿到 SDK.
+function ensureSdkAndTemplates() {
+  mkdirSync(STRAT_DIR, { recursive: true });
+  const skillDir = resolve(__dir, '..');
+  const sdkSrc = resolve(skillDir, 'lib', 'aicoin_data.py');
+  const defaultsSrc = resolve(skillDir, 'lib', 'defaults.json');
+  const strategiesSrc = resolve(skillDir, 'strategies');
+
+  if (existsSync(sdkSrc)) {
+    const sdkDest = resolve(STRAT_DIR, 'aicoin_data.py');
+    if (!existsSync(sdkDest)) copyFileSync(sdkSrc, sdkDest);
   }
-  const content = readFileSync(ENV_FILE, 'utf-8');
-  const lines = content.split('\n');
-  const idx = lines.findIndex(l => l.trim().startsWith(`${key}=`));
-  if (idx >= 0) {
-    lines[idx] = `${key}=${val}`;
-    writeFileSync(ENV_FILE, lines.join('\n'));
-  } else {
-    writeFileSync(ENV_FILE, content.trimEnd() + `\n${key}=${val}\n`);
+  if (existsSync(defaultsSrc)) {
+    const dDest = resolve(STRAT_DIR, 'defaults.json');
+    if (!existsSync(dDest)) copyFileSync(defaultsSrc, dDest);
+  }
+  if (existsSync(strategiesSrc)) {
+    for (const f of readdirSync(strategiesSrc)) {
+      if (f.endsWith('.py')) {
+        const dest = resolve(STRAT_DIR, f);
+        if (!existsSync(dest)) copyFileSync(resolve(strategiesSrc, f), dest);
+      }
+    }
   }
 }
 
-function getPid() {
-  if (!existsSync(PID_FILE)) return null;
-  const pid = readFileSync(PID_FILE, 'utf-8').trim();
-  if (!pid) return null;
-  try { process.kill(Number(pid), 0); return Number(pid); } catch { return null; }
-}
-
-// ─── Actions ───
-
+// ─── Actions ─────────────────────────────────────────────────────
 const actions = {
+  // ── check ──────────────────────────────────────────────────────
+  // coinclaw 模式: ping daemon + show_config + balance.
+  // host 模式: 检查 python / git / freqtrade installed / pid.
   check: async () => {
-    const checks = {};
-    // Python — needs 3.11+
+    if (ENV) {
+      const checks = { mode: 'coinclaw', engine: ENV.engine, paths: {
+        userdir: USER_DATA, strategy_path: STRAT_DIR, config: CONFIG_PATH,
+      }};
+      const state = await fetchDaemonState();
+      checks.daemon_online = state.online;
+      if (state.online) {
+        checks.strategy = state.strategy;
+        checks.exchange = state.exchange;
+        checks.dry_run = state.dry_run;
+        checks.timeframe = state.timeframe;
+        checks.trading_mode = state.trading_mode;
+        try {
+          const bal = await ftGet('balance');
+          checks.total = bal.total;
+          checks.starting_capital = bal.starting_capital;
+          checks.stake_currency = bal.stake;
+        } catch (e) { checks.balance_error = e.message; }
+      } else {
+        checks.note = '在 coinclaw 容器里 daemon 由 supervisord 管理, 它没起来通常是 cold-start 卡住或 config 写错; 看 /workspace/logs/freqtrade-error.log 或 /home/node/.openclaw/workspace/.freqtrade/logs/';
+      }
+      return checks;
+    }
+    // host mode
+    const checks = { mode: 'host' };
     const py = findPython();
     checks.python = py ? `${py.version} (${py.bin})` : false;
     if (!py) {
-      // Check if any python3 exists but too old
       try {
         const v = run('python3 --version');
         checks.python_warning = `${v} found but Freqtrade requires 3.11+. Deploy will auto-install 3.12.`;
       } catch {}
     }
-    // git
     checks.git = hasCommand('git');
-    // Freqtrade source
-    checks.source_cloned = existsSync(resolve(SRC_DIR, 'setup.sh'));
-    // Freqtrade installed
+    checks.source_cloned = existsSync(resolve(HOST.sourceDir, 'setup.sh'));
     checks.freqtrade_installed = existsSync(FT_BIN);
     if (checks.freqtrade_installed) {
       try { checks.freqtrade_version = run(`${FT_BIN} --version`); } catch {}
     }
-    // Exchange keys
     const ex = detectExchange();
     checks.exchange = ex ? { name: ex.name, configured: true } : { configured: false };
-    // Running
-    const pid = getPid();
+    const pid = getHostPid();
     checks.running = !!pid;
     if (pid) checks.pid = pid;
-
     checks.ready = (!!py || process.platform === 'darwin') && checks.git && checks.exchange?.configured;
     if (!checks.ready) {
       checks.missing = [];
@@ -268,15 +378,44 @@ const actions = {
     return checks;
   },
 
+  // ── deploy ─────────────────────────────────────────────────────
+  // coinclaw 模式: 写策略 (如果 caller 已 create_strategy 就是 no-op) +
+  //   改 config.strategy + 重启 daemon. 不再 git clone, 不再 nohup.
+  // host 模式: 沿用老路径 (clone + setup.sh + nohup).
   deploy: async (params = {}) => {
-    // 1. Ensure Python 3.11+ (auto-installs on macOS if needed)
+    if (ENV) {
+      const strategy = params.strategy;
+      if (!strategy) throw new Error('strategy 必填, 例: {"strategy":"MyStrat"}');
+      const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
+      if (!existsSync(stratFile)) {
+        throw new Error(`策略文件不存在: ${stratFile}. 先用 ft-deploy.mjs create_strategy 或 Write 工具写文件到 ${STRAT_DIR}/`);
+      }
+      const cfg = readDaemonConfig();
+      const before = { strategy: cfg.strategy, dry_run: cfg.dry_run, pairs: cfg.exchange?.pair_whitelist };
+      cfg.strategy = strategy;
+      // 允许在 deploy 里同时改 dry_run / pairs / max_open_trades, 一次完成.
+      if (typeof params.dry_run === 'boolean') cfg.dry_run = params.dry_run;
+      if (Array.isArray(params.pairs) && params.pairs.length) {
+        if (!cfg.exchange) cfg.exchange = {};
+        cfg.exchange.pair_whitelist = params.pairs;
+      }
+      if (params.max_open_trades) cfg.max_open_trades = params.max_open_trades;
+      writeDaemonConfig(cfg);
+      const restart = restartDaemon();
+      return {
+        success: true, mode: 'coinclaw', engine: ENV.engine,
+        strategy, before, restart,
+        config_path: CONFIG_PATH, strategy_file: stratFile,
+        note: '策略生效需 daemon 重启完成 (10-30s); dashboard 会自动刷新到新策略名',
+        warning: cfg.dry_run === false
+          ? '⚠️ 已切到实盘 — 真实交易, 真实亏损. 确认 .env 里交易所 key 正确, 余额可控.'
+          : null,
+      };
+    }
+    // host mode (老逻辑, 保留不动)
     const py = ensureModernPython();
     console.error(`Using ${py.version} (${py.bin})`);
-
-    // 2. Ensure git
-    if (!hasCommand('git')) throw new Error('git not found. Install: apt install git (Linux) or xcode-select --install (macOS)');
-
-    // 3. Detect exchange (allow dummy keys for dry_run)
+    if (!hasCommand('git')) throw new Error('git not found.');
     let exchangeInfo = detectExchange();
     if (!exchangeInfo) {
       if (params.dry_run !== false) {
@@ -287,202 +426,192 @@ const actions = {
         throw new Error('No exchange API keys found in .env (required for live trading)');
       }
     }
-
-    // 4. Create directories
     mkdirSync(STRAT_DIR, { recursive: true });
-
-    // 4b. Copy AiCoin Python SDK + strategy templates
-    const skillDir = resolve(__dir, '..');
-    const sdkSrc = resolve(skillDir, 'lib', 'aicoin_data.py');
-    const defaultsSrc = resolve(skillDir, 'lib', 'defaults.json');
-    const strategiesSrc = resolve(skillDir, 'strategies');
-
-    if (existsSync(sdkSrc)) {
-      copyFileSync(sdkSrc, resolve(STRAT_DIR, 'aicoin_data.py'));
-      console.error('Copied AiCoin Python SDK to strategies/');
-    }
-    if (existsSync(defaultsSrc)) {
-      copyFileSync(defaultsSrc, resolve(STRAT_DIR, 'defaults.json'));
-    }
-    if (existsSync(strategiesSrc)) {
-      for (const f of readdirSync(strategiesSrc)) {
-        if (f.endsWith('.py')) {
-          const dest = resolve(STRAT_DIR, f);
-          if (!existsSync(dest)) {
-            copyFileSync(resolve(strategiesSrc, f), dest);
-            console.error(`Copied strategy template: ${f}`);
-          }
-        }
-      }
-    }
-
-    // 5. Clone + install Freqtrade via official setup.sh
+    ensureSdkAndTemplates();
     if (!existsSync(FT_BIN)) {
-      // Clone repo if not present
-      if (!existsSync(resolve(SRC_DIR, 'setup.sh'))) {
+      if (!existsSync(resolve(HOST.sourceDir, 'setup.sh'))) {
         console.error('Cloning Freqtrade repository...');
-        run(`git clone https://github.com/freqtrade/freqtrade.git ${SRC_DIR}`, { timeout: 120000 });
-        run(`cd ${SRC_DIR} && git checkout stable`, { timeout: 30000 });
+        run(`git clone https://github.com/freqtrade/freqtrade.git ${HOST.sourceDir}`, { timeout: 120000 });
+        run(`cd ${HOST.sourceDir} && git checkout stable`, { timeout: 30000 });
       }
-
-      // Run official setup.sh (handles TA-Lib, venv, all dependencies)
-      // Ensure Python 3.11+ is in PATH so setup.sh can find it
       console.error('Running Freqtrade setup.sh (this may take a few minutes)...');
       const pyDir = dirname(py.bin);
       const setupEnv = { ...process.env, PATH: `${pyDir}:${process.env.PATH}` };
-      run(`cd ${SRC_DIR} && ./setup.sh -i`, { timeout: 600000, env: setupEnv });
-
-      if (!existsSync(FT_BIN)) {
-        throw new Error('Freqtrade installation failed. Check output above for errors.');
-      }
+      run(`cd ${HOST.sourceDir} && ./setup.sh -i`, { timeout: 600000, env: setupEnv });
+      if (!existsSync(FT_BIN)) throw new Error('Freqtrade installation failed.');
     }
-
-    // 6. Generate config
     const apiPassword = randomBytes(8).toString('hex');
-    const config = generateConfig(exchangeInfo, apiPassword, params);
+    const config = generateHostConfig(exchangeInfo, apiPassword, params);
     writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
-
-    // 7. Create sample strategy if none exists
     const samplePath = resolve(STRAT_DIR, 'SampleStrategy.py');
-    if (!existsSync(samplePath)) {
-      writeFileSync(samplePath, SAMPLE_STRATEGY);
-    }
-
-    // 8. Stop existing process
-    const oldPid = getPid();
+    if (!existsSync(samplePath)) writeFileSync(samplePath, SAMPLE_STRATEGY);
+    const oldPid = getHostPid();
     if (oldPid) { try { process.kill(oldPid, 'SIGTERM'); } catch {} }
-
-    // 9. Start freqtrade as background process (with proxy env vars)
     const strategy = params.strategy || 'SampleStrategy';
-    // Validate strategy exists
     const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
     if (strategy !== 'SampleStrategy' && !existsSync(stratFile)) {
-      throw new Error(`Strategy "${strategy}" not found at ${stratFile}. Use strategy_list to see available strategies, or create_strategy to create one.`);
+      throw new Error(`Strategy "${strategy}" not found at ${stratFile}. Use create_strategy first.`);
     }
     const proxyEnv = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
     const proxyPrefix = proxyEnv ? `env HTTPS_PROXY=${proxyEnv} HTTP_PROXY=${proxyEnv} ` : '';
-    run(`nohup ${proxyPrefix}${FT_BIN} trade --config ${CONFIG_PATH} --strategy ${strategy} --userdir ${USER_DATA} > ${LOG_FILE} 2>&1 & echo $! > ${PID_FILE}`);
-
-    // 10. Wait for startup
+    run(`nohup ${proxyPrefix}${FT_BIN} trade --config ${CONFIG_PATH} --strategy ${strategy} --userdir ${USER_DATA} > ${HOST.logFile} 2>&1 & echo $! > ${HOST.pidFile}`);
     let ready = false;
     for (let i = 0; i < 15; i++) {
-      await new Promise(r => setTimeout(r, 2000));
-      const pid = getPid();
+      await new Promise((r) => setTimeout(r, 2000));
+      const pid = getHostPid();
       if (pid) {
         try {
-          const res = await fetch(`http://127.0.0.1:${API_PORT}/api/v1/ping`, {
-            headers: { Authorization: 'Basic ' + Buffer.from(`freqtrader:${apiPassword}`).toString('base64') },
+          const res = await fetch(`http://127.0.0.1:8080/api/v1/ping`, {
+            headers: { Authorization: 'Basic ' + Buffer.from(`freqtrade:${apiPassword}`).toString('base64') },
             signal: AbortSignal.timeout(3000),
           });
           if (res.ok) { ready = true; break; }
         } catch {}
       }
     }
-
-    // 11. Write env vars
-    appendEnv('FREQTRADE_URL', `http://127.0.0.1:${API_PORT}`);
-    appendEnv('FREQTRADE_USERNAME', 'freqtrader');
+    appendEnv('FREQTRADE_URL', 'http://127.0.0.1:8080');
+    appendEnv('FREQTRADE_USERNAME', 'freqtrade');
     appendEnv('FREQTRADE_PASSWORD', apiPassword);
-
     return {
-      success: true,
-      exchange: exchangeInfo.name,
-      strategy,
-      dry_run: config.dry_run,
+      success: true, mode: 'host',
+      exchange: exchangeInfo.name, strategy, dry_run: config.dry_run,
       pairs: config.exchange.pair_whitelist,
-      api_url: `http://127.0.0.1:${API_PORT}`,
-      api_password: apiPassword,
-      pid: getPid(),
-      ready,
-      log_file: LOG_FILE,
-      config_path: CONFIG_PATH,
+      api_url: 'http://127.0.0.1:8080', api_password: apiPassword,
+      pid: getHostPid(), ready, log_file: HOST.logFile, config_path: CONFIG_PATH,
       strategies_dir: STRAT_DIR,
-      note: config.dry_run
-        ? 'Running in DRY-RUN mode (no real money). Use deploy with {"dry_run":false} for live trading.'
-        : 'WARNING: Running in LIVE mode with real money!',
-      aicoin_strategies: existsSync(resolve(STRAT_DIR, 'aicoin_data.py'))
-        ? ['FundingRateStrategy', 'WhaleFollowStrategy', 'LiquidationHunterStrategy']
-        : [],
+      note: config.dry_run ? 'Running in DRY-RUN mode' : 'WARNING: Running in LIVE mode',
     };
   },
 
+  // ── update ─────────────────────────────────────────────────────
   update: async () => {
-    if (!existsSync(resolve(SRC_DIR, 'setup.sh'))) {
+    if (ENV) {
+      return {
+        skipped: true, mode: 'coinclaw',
+        note: '在 coinclaw 容器里 freqtrade 由 image 预装, 升级请 helm upgrade 整个 instance (web 端有"升级"按钮), 不能在容器里 git pull',
+      };
+    }
+    if (!existsSync(resolve(HOST.sourceDir, 'setup.sh'))) {
       return { error: 'Freqtrade not installed. Run deploy first.' };
     }
-    // Stop if running
-    const pid = getPid();
+    const pid = getHostPid();
     if (pid) { try { process.kill(pid, 'SIGTERM'); } catch {} }
-
     console.error('Updating Freqtrade...');
-    run(`cd ${SRC_DIR} && ./setup.sh -u`, { timeout: 600000 });
-    return { updated: true, note: 'Run start to restart Freqtrade.' };
+    run(`cd ${HOST.sourceDir} && ./setup.sh -u`, { timeout: 600000 });
+    return { updated: true, mode: 'host', note: 'Run start to restart Freqtrade.' };
   },
 
+  // ── status ─────────────────────────────────────────────────────
   status: async () => {
-    const pid = getPid();
-    if (!pid) return { running: false };
+    if (ENV) {
+      const state = await fetchDaemonState();
+      const result = { mode: 'coinclaw', engine: ENV.engine, ...state };
+      // tail freqtrade 日志, 三引擎日志位置不同.
+      const logCandidates = [
+        '/workspace/logs/freqtrade.log',
+        '/workspace/logs/freqtrade-error.log',
+      ];
+      for (const log of logCandidates) {
+        if (existsSync(log)) {
+          try { result.last_logs = run(`tail -10 ${log}`); break; } catch {}
+        }
+      }
+      return result;
+    }
+    const pid = getHostPid();
+    if (!pid) return { mode: 'host', running: false };
     let lastLogs = '';
-    try { lastLogs = run(`tail -5 ${LOG_FILE} 2>/dev/null`); } catch {}
-    return { running: true, pid, log_file: LOG_FILE, last_logs: lastLogs };
+    try { lastLogs = run(`tail -5 ${HOST.logFile} 2>/dev/null`); } catch {}
+    return { mode: 'host', running: true, pid, log_file: HOST.logFile, last_logs: lastLogs };
   },
 
+  // ── stop / start ───────────────────────────────────────────────
+  // coinclaw 模式: supervisorctl. host 模式: SIGTERM pid.
   stop: async () => {
-    const pid = getPid();
-    if (!pid) return { stopped: false, reason: 'Not running' };
+    if (ENV) {
+      const sock = supervisorSocket();
+      try {
+        run(`supervisorctl -s unix://${sock} stop freqtrade`);
+        return { stopped: true, mode: 'coinclaw', method: 'supervisorctl' };
+      } catch (e) {
+        return { stopped: false, error: e.message, note: 'supervisorctl 不可达, 试试 ft.mjs stop (REST)' };
+      }
+    }
+    const pid = getHostPid();
+    if (!pid) return { stopped: false, mode: 'host', reason: 'Not running' };
     try { process.kill(pid, 'SIGTERM'); } catch {}
-    try { writeFileSync(PID_FILE, ''); } catch {}
-    return { stopped: true, pid };
+    try { writeFileSync(HOST.pidFile, ''); } catch {}
+    return { stopped: true, mode: 'host', pid };
   },
 
   start: async (params = {}) => {
-    if (getPid()) return { started: false, reason: 'Already running' };
+    if (ENV) {
+      const sock = supervisorSocket();
+      try {
+        run(`supervisorctl -s unix://${sock} start freqtrade`);
+        return { started: true, mode: 'coinclaw', method: 'supervisorctl' };
+      } catch (e) {
+        return { started: false, error: e.message };
+      }
+    }
+    if (getHostPid()) return { started: false, mode: 'host', reason: 'Already running' };
     if (!existsSync(FT_BIN)) throw new Error('Freqtrade not installed. Run deploy first.');
     if (!existsSync(CONFIG_PATH)) throw new Error('No config found. Run deploy first.');
     const strategy = params.strategy || 'SampleStrategy';
     const proxyUrl = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
     const proxyPrefix = proxyUrl ? `env HTTPS_PROXY=${proxyUrl} HTTP_PROXY=${proxyUrl} ` : '';
-    run(`nohup ${proxyPrefix}${FT_BIN} trade --config ${CONFIG_PATH} --strategy ${strategy} --userdir ${USER_DATA} > ${LOG_FILE} 2>&1 & echo $! > ${PID_FILE}`);
-    await new Promise(r => setTimeout(r, 3000));
-    return { started: true, pid: getPid() };
+    run(`nohup ${proxyPrefix}${FT_BIN} trade --config ${CONFIG_PATH} --strategy ${strategy} --userdir ${USER_DATA} > ${HOST.logFile} 2>&1 & echo $! > ${HOST.pidFile}`);
+    await new Promise((r) => setTimeout(r, 3000));
+    return { started: true, mode: 'host', pid: getHostPid() };
   },
 
+  // ── logs ───────────────────────────────────────────────────────
+  // coinclaw 模式: tail /workspace/logs/freqtrade.log (supervisord 写在那).
+  // host 模式: tail freqtrade.log.
   logs: async ({ lines = 50 } = {}) => {
-    try { return { logs: run(`tail -${lines} ${LOG_FILE} 2>/dev/null`) }; } catch { return { logs: 'No log file found' }; }
+    if (ENV) {
+      for (const log of ['/workspace/logs/freqtrade.log', '/workspace/logs/freqtrade-error.log']) {
+        if (existsSync(log)) {
+          try { return { mode: 'coinclaw', log_file: log, logs: run(`tail -${lines} ${log}`) }; } catch {}
+        }
+      }
+      return { mode: 'coinclaw', logs: '(no log file found in /workspace/logs)' };
+    }
+    try { return { mode: 'host', logs: run(`tail -${lines} ${HOST.logFile} 2>/dev/null`) }; }
+    catch { return { mode: 'host', logs: 'No log file found' }; }
   },
 
+  // ── backtest ───────────────────────────────────────────────────
+  // 两边都用 freqtrade backtesting CLI; 区别只在路径.
+  // coinclaw 模式跑 backtest 不影响 daemon: backtesting 走自己的进程,
+  // 跟 daemon 共用 user_data 但不共用 :8080.
   backtest: async (params = {}) => {
-    if (!existsSync(FT_BIN)) throw new Error('Freqtrade not installed. Run deploy first.');
-    // Auto-create config for backtest if missing (no exchange keys needed)
+    if (!existsSync(FT_BIN) && !ENV) throw new Error('Freqtrade not installed. Run deploy first.');
     if (!existsSync(CONFIG_PATH)) {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
       const exchange = params.exchange || 'binance';
-      const backtestConfig = generateConfig(
+      const cfg = generateHostConfig(
         { name: exchange, key: 'backtest-only', secret: 'backtest-only' },
         randomBytes(8).toString('hex'),
         { dry_run: true, pairs: params.pairs || ['BTC/USDT:USDT'] },
       );
-      writeFileSync(CONFIG_PATH, JSON.stringify(backtestConfig, null, 2));
+      writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
       console.error(`Auto-created backtest config (exchange: ${exchange})`);
     }
     const strategy = params.strategy || 'SampleStrategy';
-    // Validate strategy exists
     const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
     if (!existsSync(stratFile)) {
-      throw new Error(`Strategy "${strategy}" not found at ${stratFile}. Use strategy_list to see available strategies, or create_strategy to create one.`);
+      throw new Error(`Strategy "${strategy}" not found at ${stratFile}. Use create_strategy or list with strategy_list.`);
     }
     const timeframe = params.timeframe || '1h';
     const timerange = params.timerange || '';
     const timerangeArg = timerange ? ` --timerange ${timerange}` : '';
-    const pairs = params.pairs; // e.g. ["ETH/USDT:USDT"] or "ETH/USDT:USDT"
-    const pairsArg = pairs
-      ? ` -p ${(Array.isArray(pairs) ? pairs : [pairs]).join(' ')}`
-      : '';
+    const pairs = params.pairs;
+    const pairsArg = pairs ? ` -p ${(Array.isArray(pairs) ? pairs : [pairs]).join(' ')}` : '';
 
     const proxyEnv = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
     const proxyPrefix = proxyEnv ? `env HTTPS_PROXY=${proxyEnv} HTTP_PROXY=${proxyEnv} ` : '';
 
-    // Auto-download historical data first
     console.error('Downloading historical data...');
     try {
       run(
@@ -493,34 +622,32 @@ const actions = {
       console.error(`Data download warning: ${e.message}`);
     }
 
-    // Run backtest
     console.error(`Running backtest: strategy=${strategy}, timeframe=${timeframe}${timerange ? `, timerange=${timerange}` : ''}...`);
     const rawOutput = run(
       `${proxyPrefix}${FT_BIN} backtesting --config ${CONFIG_PATH} --strategy ${strategy} --timeframe ${timeframe}${timerangeArg}${pairsArg} --userdir ${USER_DATA}`,
       { timeout: 600000 }
     );
-    // Filter: keep only result lines, strip proxy/internal addresses
     const output = rawOutput
       .split('\n')
-      .filter(l => !l.includes('INFO') || l.includes('TOTAL') || l.includes('Result') || l.includes('trades') || l.includes('Profit') || l.includes('Drawdown') || l.includes('Win') || l.includes('Avg'))
+      .filter((l) => !l.includes('INFO') || l.includes('TOTAL') || l.includes('Result') || l.includes('trades') || l.includes('Profit') || l.includes('Drawdown') || l.includes('Win') || l.includes('Avg'))
       .join('\n')
       .replace(/\b127\.0\.0\.1:\d+\b/g, '[local]')
       .replace(/https?:\/\/\d+\.\d+\.\d+\.\d+:\d+/g, '[proxy]');
-    return { strategy, timeframe, timerange: timerange || 'all available', output };
+    return { mode: ENV ? 'coinclaw' : 'host', strategy, timeframe, timerange: timerange || 'all available', output };
   },
 
+  // ── download_data ──────────────────────────────────────────────
   download_data: async (params = {}) => {
-    if (!existsSync(FT_BIN)) throw new Error('Freqtrade not installed. Run deploy first.');
+    if (!existsSync(FT_BIN) && !ENV) throw new Error('Freqtrade not installed. Run deploy first.');
     if (!existsSync(CONFIG_PATH)) {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
       const exchange = params.exchange || 'binance';
-      const dlConfig = generateConfig(
+      const cfg = generateHostConfig(
         { name: exchange, key: 'download-only', secret: 'download-only' },
         randomBytes(8).toString('hex'),
         { dry_run: true, pairs: params.pairs || ['BTC/USDT:USDT'] },
       );
-      writeFileSync(CONFIG_PATH, JSON.stringify(dlConfig, null, 2));
-      console.error(`Auto-created config for data download (exchange: ${exchange})`);
+      writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
     }
     const timeframe = params.timeframe || '1h';
     const timerange = params.timerange || '';
@@ -534,29 +661,26 @@ const actions = {
       `${proxyPrefix}${FT_BIN} download-data --config ${CONFIG_PATH} --timeframe ${timeframe}${timerangeArg} --userdir ${USER_DATA}`,
       { timeout: 300000 }
     );
-    return { timeframe, timerange: timerange || 'all available', output };
+    return { mode: ENV ? 'coinclaw' : 'host', timeframe, timerange: timerange || 'all available', output };
   },
 
+  // ── hyperopt ───────────────────────────────────────────────────
   hyperopt: async (params = {}) => {
-    if (!existsSync(FT_BIN)) throw new Error('Freqtrade not installed. Run deploy first.');
+    if (!existsSync(FT_BIN) && !ENV) throw new Error('Freqtrade not installed.');
     if (!existsSync(CONFIG_PATH)) {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
       const exchange = params.exchange || 'binance';
-      const hConfig = generateConfig(
+      const cfg = generateHostConfig(
         { name: exchange, key: 'hyperopt-only', secret: 'hyperopt-only' },
         randomBytes(8).toString('hex'),
         { dry_run: true, pairs: params.pairs || ['BTC/USDT:USDT'] },
       );
-      writeFileSync(CONFIG_PATH, JSON.stringify(hConfig, null, 2));
-      console.error(`Auto-created config for hyperopt (exchange: ${exchange})`);
+      writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
     }
 
     const strategy = params.strategy || 'SampleStrategy';
-    // Validate strategy exists
-    const hStratFile = resolve(STRAT_DIR, `${strategy}.py`);
-    if (!existsSync(hStratFile)) {
-      throw new Error(`Strategy "${strategy}" not found at ${hStratFile}. Use strategy_list to see available strategies, or create_strategy to create one.`);
-    }
+    const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
+    if (!existsSync(stratFile)) throw new Error(`Strategy "${strategy}" not found at ${stratFile}.`);
     const timeframe = params.timeframe || '1h';
     const timerange = params.timerange || '';
     const epochs = Math.min(Number(params.epochs) || 100, 500);
@@ -569,15 +693,12 @@ const actions = {
     const proxyEnv = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
     const proxyPrefix = proxyEnv ? `env HTTPS_PROXY=${proxyEnv} HTTP_PROXY=${proxyEnv} ` : '';
 
-    console.error('Downloading historical data for hyperopt...');
     try {
       run(
         `${proxyPrefix}${FT_BIN} download-data --config ${CONFIG_PATH} --timeframe ${timeframe}${timerangeArg} --userdir ${USER_DATA}`,
         { timeout: 300000 }
       );
-    } catch (e) {
-      console.error(`Data download warning: ${e.message}`);
-    }
+    } catch (e) { console.error(`Data download warning: ${e.message}`); }
 
     console.error(`Running hyperopt: strategy=${strategy}, epochs=${epochs}, jobs=${jobs}, spaces=${spaces}`);
     const output = run(
@@ -585,68 +706,66 @@ const actions = {
       { timeout: 1800000 }
     );
 
-    return { strategy, timeframe, epochs, spaces, jobs, loss_function: lossFunc, output };
+    return { mode: ENV ? 'coinclaw' : 'host', strategy, timeframe, epochs, spaces, jobs, loss_function: lossFunc, output };
   },
 
+  // ── create_strategy ────────────────────────────────────────────
+  // 写策略文件到 STRAT_DIR (三引擎下分别是 daemon 真读的路径).
   create_strategy: async (params = {}) => {
     let name = params.name;
-    if (!name) throw new Error('name is required. Example: {"name":"MyStrategy","timeframe":"15m","indicators":["rsi","macd","bb"],"aicoin_data":["funding_rate","ls_ratio"]}');
-    // Auto-fix common naming issues from weak models
-    name = name.replace(/[^A-Za-z0-9_]/g, '');  // strip invalid chars
-    if (name && /^[a-z]/.test(name)) name = name[0].toUpperCase() + name.slice(1);  // auto-capitalize
+    if (!name) throw new Error('name is required. Example: {"name":"MyStrategy","timeframe":"15m","indicators":["rsi","macd"],"aicoin_data":["funding_rate"]}');
+    name = name.replace(/[^A-Za-z0-9_]/g, '');
+    if (name && /^[a-z]/.test(name)) name = name[0].toUpperCase() + name.slice(1);
     if (!/^[A-Z][A-Za-z0-9_]+$/.test(name)) throw new Error('name must be a valid Python class name starting with uppercase (e.g. MyStrategy)');
 
-    mkdirSync(STRAT_DIR, { recursive: true });
+    ensureSdkAndTemplates();
     const dest = resolve(STRAT_DIR, `${name}.py`);
     const tf = params.timeframe || '15m';
     const desc = params.description || 'Custom strategy';
-    const PAID_DATA = { funding_rate: '基础版 ($29/mo)', ls_ratio: '基础版 ($29/mo)', big_orders: '标准版 ($79/mo)', open_interest: '专业版 ($699/mo)', liquidation_map: '高级版 ($299/mo)' };
     const ds = new Set(params.aicoin_data || []);
-    const indicators = params.indicators || null;  // null = use defaults (rsi, bb, ema, volume_sma)
+    const indicators = params.indicators || null;
     const entryLogic = params.entry_logic || null;
     const exitLogic = params.exit_logic || null;
 
-    // Available indicators
-    const AVAILABLE_INDICATORS = ['rsi', 'bb', 'bollinger', 'ema', 'sma', 'macd', 'stochastic', 'kdj', 'atr', 'adx', 'cci', 'williams_r', 'willr', 'vwap', 'ichimoku', 'volume_sma', 'volume', 'obv'];
-
-    // Validate indicators
     if (indicators) {
-      const invalid = indicators.filter(i => !AVAILABLE_INDICATORS.includes(i.toLowerCase()));
+      const invalid = indicators.filter((i) => !AVAILABLE_INDICATORS.includes(i.toLowerCase()));
       if (invalid.length > 0) {
         throw new Error(`Unknown indicators: ${invalid.join(', ')}. Available: ${AVAILABLE_INDICATORS.join(', ')}`);
       }
     }
 
-    // Detect if using built-in free key (no custom key configured)
     const KEY = process.env.AICOIN_ACCESS_KEY_ID || '';
-    const defaultKey = JSON.parse(readFileSync(resolve(__dir, '..', 'lib', 'defaults.json'), 'utf8')).accessKeyId || '';
+    const defaultKey = JSON.parse(readFileSync(resolve(__dir, '..', 'lib', 'defaults.json'), 'utf-8')).accessKeyId || '';
     const usingFreeKey = !KEY || KEY === defaultKey;
-    const paidUsed = [...ds].filter(d => d in PAID_DATA);
+    const paidUsed = [...ds].filter((d) => d in PAID_DATA);
 
     const code = buildStrategyCode(name, tf, desc, ds, indicators, entryLogic, exitLogic);
     writeFileSync(dest, code);
 
     const result = {
-      success: true,
-      strategy: name,
-      file: dest,
+      success: true, strategy: name, file: dest,
+      mode: ENV ? 'coinclaw' : 'host', engine: ENV ? ENV.engine : null,
       timeframe: tf,
       indicators: indicators || ['rsi', 'bb', 'ema', 'volume_sma'],
       aicoin_data: [...ds],
       note: ds.size
         ? `Strategy uses AiCoin data (${[...ds].join(', ')}) in live/dry_run. Falls back to pure technical indicators in backtest.`
         : 'Pure technical indicator strategy. To add AiCoin data, pass aicoin_data array.',
+      next: ENV
+        ? `策略文件已写; 用 deploy {"strategy":"${name}"} 让常驻 daemon 切到这个策略 (会触发 ~30s 重启), 或先 backtest 验证`
+        : `Use deploy {"strategy":"${name}"} to start in dry-run, or backtest first`,
       available_indicators: AVAILABLE_INDICATORS,
-      available_aicoin_data: ['funding_rate (免费版)', 'ls_ratio (免费版)', 'big_orders (标准版)', 'open_interest (专业版)', 'liquidation_map (高级版)'],
+      available_aicoin_data: AVAILABLE_AICOIN_DATA,
     };
 
     if (usingFreeKey && paidUsed.length > 0) {
-      result.warning = `PAID KEY REQUIRED — Strategy uses ${paidUsed.map(d => `${d} (${PAID_DATA[d]})`).join(', ')} but no paid API key is configured. These data sources will silently fall back to defaults in live mode. Guide user: get API key at https://www.aicoin.com/opendata → add AICOIN_ACCESS_KEY_ID & AICOIN_ACCESS_SECRET to .env.`;
+      result.warning = `PAID KEY REQUIRED — Strategy uses ${paidUsed.map((d) => `${d} (${PAID_DATA[d]})`).join(', ')} but no paid API key is configured. These data sources will silently fall back to defaults in live mode. Get key at https://www.aicoin.com/opendata → add AICOIN_ACCESS_KEY_ID & AICOIN_ACCESS_SECRET to .env.`;
     }
 
     return result;
   },
 
+  // ── strategy_list ──────────────────────────────────────────────
   strategy_list: async () => {
     const files = [];
     if (existsSync(STRAT_DIR)) {
@@ -656,24 +775,32 @@ const actions = {
         }
       }
     }
-    return { strategies: files, path: STRAT_DIR };
+    return { mode: ENV ? 'coinclaw' : 'host', strategies: files, path: STRAT_DIR };
   },
 
+  // ── remove ─────────────────────────────────────────────────────
   remove: async () => {
-    const pid = getPid();
+    if (ENV) {
+      return {
+        skipped: true, mode: 'coinclaw',
+        note: '在 coinclaw 容器里 freqtrade 是常驻 daemon, 不能 remove. 用 stop 停 daemon, 或 deploy {"strategy":"NoOpStrategy"} 切到空跑策略, 或在 web UI 删整个 instance',
+      };
+    }
+    const pid = getHostPid();
     if (pid) { try { process.kill(pid, 'SIGTERM'); } catch {} }
-    try { writeFileSync(PID_FILE, ''); } catch {}
-    return { removed: true, note: `Process stopped. Config preserved at ${FT_DIR}. To fully remove: rm -rf ${FT_DIR}` };
+    try { writeFileSync(HOST.pidFile, ''); } catch {}
+    return { removed: true, mode: 'host', note: `Process stopped. Config preserved.` };
   },
 
+  // ── backtest_results ───────────────────────────────────────────
   backtest_results: async () => {
     const resultsDir = resolve(USER_DATA, 'backtest_results');
-    if (!existsSync(resultsDir)) return { results: [], path: resultsDir };
+    if (!existsSync(resultsDir)) return { mode: ENV ? 'coinclaw' : 'host', results: [], path: resultsDir };
     const files = readdirSync(resultsDir)
-      .filter(f => f.endsWith('.meta.json'))
-      .map(f => {
+      .filter((f) => f.endsWith('.meta.json'))
+      .map((f) => {
         try {
-          const meta = JSON.parse(readFileSync(resolve(resultsDir, f), 'utf8'));
+          const meta = JSON.parse(readFileSync(resolve(resultsDir, f), 'utf-8'));
           const strategy = Object.keys(meta)[0] || 'unknown';
           const info = meta[strategy] || {};
           return {
@@ -688,578 +815,23 @@ const actions = {
       .filter(Boolean)
       .sort((a, b) => b.file.localeCompare(a.file))
       .slice(0, 10);
-    return { results: files, path: resultsDir };
+    return { mode: ENV ? 'coinclaw' : 'host', results: files, path: resultsDir };
   },
 };
 
-// ─── Strategy code generator ───
-
-function buildStrategyCode(name, tf, desc, ds, indicators, entryLogic, exitLogic) {
-  const L = [];  // lines
-  const has = k => ds.has(k);
-  const any = ds.size > 0;
-
-  // Determine which indicators to include
-  const defaultIndicators = ['rsi', 'bb', 'ema', 'volume_sma'];
-  const allIndicators = new Set(indicators && indicators.length ? indicators.map(i => i.toLowerCase()) : defaultIndicators);
-  const hasInd = k => allIndicators.has(k);
-
-  // Header
-  L.push(`# ${name} - ${desc}`);
-  if (any) L.push(`# AiCoin data: ${[...ds].join(', ')} (live/dry_run only)`);
-  L.push(`# Indicators: ${[...allIndicators].join(', ')}`);
-  L.push(`# Backtest: uses technical indicators only`);
-  L.push(`#`);
-  L.push(`from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter`);
-  L.push(`from pandas import DataFrame`);
-  L.push(`import logging`);
-  L.push(``);
-  L.push(`logger = logging.getLogger(__name__)`);
-  L.push(``);
-  L.push(``);
-  L.push(`class ${name}(IStrategy):`);
-  L.push(`    INTERFACE_VERSION = 3`);
-  L.push(`    timeframe = '${tf}'`);
-  L.push(`    can_short = True`);
-  L.push(``);
-  L.push(`    minimal_roi = {"0": 0.05, "60": 0.03, "120": 0.01}`);
-  L.push(`    stoploss = -0.05`);
-  L.push(`    trailing_stop = True`);
-  L.push(`    trailing_stop_positive = 0.02`);
-  L.push(`    trailing_stop_positive_offset = 0.03`);
-  L.push(``);
-  L.push(`    # Hyperopt parameters`);
-  if (hasInd('rsi')) {
-    L.push(`    rsi_buy = IntParameter(20, 40, default=30, space='buy')`);
-    L.push(`    rsi_sell = IntParameter(60, 80, default=70, space='sell')`);
-  }
-  if (hasInd('stochastic') || hasInd('kdj')) {
-    L.push(`    stoch_buy = IntParameter(10, 30, default=20, space='buy')`);
-    L.push(`    stoch_sell = IntParameter(70, 90, default=80, space='sell')`);
-  }
-  if (hasInd('cci')) {
-    L.push(`    cci_buy = IntParameter(-200, -50, default=-100, space='buy')`);
-    L.push(`    cci_sell = IntParameter(50, 200, default=100, space='sell')`);
-  }
-  if (hasInd('williams_r') || hasInd('willr')) {
-    L.push(`    willr_buy = IntParameter(-90, -70, default=-80, space='buy')`);
-    L.push(`    willr_sell = IntParameter(-30, -10, default=-20, space='sell')`);
-  }
-  if (has('funding_rate'))
-    L.push(`    funding_threshold = DecimalParameter(0.005, 0.1, default=0.01, space='buy')`);
-  L.push(``);
-
-  // AiCoin instance vars
-  if (any) {
-    L.push(`    # AiCoin cached data (updated every 5 min in live mode)`);
-    if (has('funding_rate'))     L.push(`    _ac_funding_rate = 0.0`);
-    if (has('ls_ratio'))         L.push(`    _ac_ls_ratio = 0.5`);
-    if (has('big_orders'))       L.push(`    _ac_whale_signal = 0.0`);
-    if (has('open_interest'))    L.push(`    _ac_oi_rising = False`);
-    if (has('liquidation_map'))  L.push(`    _ac_liq_bias = 0.0`);
-    L.push(`    _ac_last_update = 0.0`);
-    L.push(``);
-  }
-
-  // populate_indicators
-  L.push(`    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:`);
-
-  // RSI
-  if (hasInd('rsi')) {
-    L.push(`        # RSI`);
-    L.push(`        delta = dataframe['close'].diff()`);
-    L.push(`        gain = delta.clip(lower=0).rolling(window=14).mean()`);
-    L.push(`        loss = (-delta.clip(upper=0)).rolling(window=14).mean()`);
-    L.push(`        rs = gain / loss`);
-    L.push(`        dataframe['rsi'] = 100 - (100 / (1 + rs))`);
-    L.push(``);
-  }
-
-  // Bollinger Bands
-  if (hasInd('bb') || hasInd('bollinger')) {
-    L.push(`        # Bollinger Bands`);
-    L.push(`        dataframe['bb_mid'] = dataframe['close'].rolling(window=20).mean()`);
-    L.push(`        bb_std = dataframe['close'].rolling(window=20).std()`);
-    L.push(`        dataframe['bb_upper'] = dataframe['bb_mid'] + 2 * bb_std`);
-    L.push(`        dataframe['bb_lower'] = dataframe['bb_mid'] - 2 * bb_std`);
-    L.push(``);
-  }
-
-  // EMA
-  if (hasInd('ema')) {
-    L.push(`        # EMA`);
-    L.push(`        dataframe['ema_fast'] = dataframe['close'].ewm(span=8, adjust=False).mean()`);
-    L.push(`        dataframe['ema_slow'] = dataframe['close'].ewm(span=21, adjust=False).mean()`);
-    L.push(``);
-  }
-
-  // SMA
-  if (hasInd('sma')) {
-    L.push(`        # SMA`);
-    L.push(`        dataframe['sma_short'] = dataframe['close'].rolling(window=10).mean()`);
-    L.push(`        dataframe['sma_long'] = dataframe['close'].rolling(window=50).mean()`);
-    L.push(``);
-  }
-
-  // MACD
-  if (hasInd('macd')) {
-    L.push(`        # MACD`);
-    L.push(`        ema12 = dataframe['close'].ewm(span=12, adjust=False).mean()`);
-    L.push(`        ema26 = dataframe['close'].ewm(span=26, adjust=False).mean()`);
-    L.push(`        dataframe['macd'] = ema12 - ema26`);
-    L.push(`        dataframe['macd_signal'] = dataframe['macd'].ewm(span=9, adjust=False).mean()`);
-    L.push(`        dataframe['macd_hist'] = dataframe['macd'] - dataframe['macd_signal']`);
-    L.push(``);
-  }
-
-  // Stochastic / KDJ
-  if (hasInd('stochastic') || hasInd('kdj')) {
-    L.push(`        # Stochastic (KDJ)`);
-    L.push(`        low14 = dataframe['low'].rolling(window=14).min()`);
-    L.push(`        high14 = dataframe['high'].rolling(window=14).max()`);
-    L.push(`        dataframe['stoch_k'] = 100 * (dataframe['close'] - low14) / (high14 - low14)`);
-    L.push(`        dataframe['stoch_d'] = dataframe['stoch_k'].rolling(window=3).mean()`);
-    L.push(`        dataframe['stoch_j'] = 3 * dataframe['stoch_k'] - 2 * dataframe['stoch_d']`);
-    L.push(``);
-  }
-
-  // ATR
-  if (hasInd('atr')) {
-    L.push(`        # ATR (Average True Range)`);
-    L.push(`        high_low = dataframe['high'] - dataframe['low']`);
-    L.push(`        high_close = (dataframe['high'] - dataframe['close'].shift()).abs()`);
-    L.push(`        low_close = (dataframe['low'] - dataframe['close'].shift()).abs()`);
-    L.push(`        tr = high_low.combine(high_close, max).combine(low_close, max)`);
-    L.push(`        dataframe['atr'] = tr.rolling(window=14).mean()`);
-    L.push(``);
-  }
-
-  // ADX
-  if (hasInd('adx')) {
-    L.push(`        # ADX (Average Directional Index)`);
-    L.push(`        plus_dm = dataframe['high'].diff().clip(lower=0)`);
-    L.push(`        minus_dm = (-dataframe['low'].diff()).clip(lower=0)`);
-    L.push(`        _tr = (dataframe['high'] - dataframe['low']).combine((dataframe['high'] - dataframe['close'].shift()).abs(), max).combine((dataframe['low'] - dataframe['close'].shift()).abs(), max)`);
-    L.push(`        atr14 = _tr.rolling(window=14).mean()`);
-    L.push(`        plus_di = 100 * plus_dm.rolling(window=14).mean() / atr14`);
-    L.push(`        minus_di = 100 * minus_dm.rolling(window=14).mean() / atr14`);
-    L.push(`        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)`);
-    L.push(`        dataframe['adx'] = dx.rolling(window=14).mean()`);
-    L.push(`        dataframe['plus_di'] = plus_di`);
-    L.push(`        dataframe['minus_di'] = minus_di`);
-    L.push(``);
-  }
-
-  // CCI
-  if (hasInd('cci')) {
-    L.push(`        # CCI (Commodity Channel Index)`);
-    L.push(`        tp = (dataframe['high'] + dataframe['low'] + dataframe['close']) / 3`);
-    L.push(`        tp_sma = tp.rolling(window=20).mean()`);
-    L.push(`        tp_mad = tp.rolling(window=20).apply(lambda x: (x - x.mean()).abs().mean(), raw=True)`);
-    L.push(`        dataframe['cci'] = (tp - tp_sma) / (0.015 * tp_mad)`);
-    L.push(``);
-  }
-
-  // Williams %R
-  if (hasInd('williams_r') || hasInd('willr')) {
-    L.push(`        # Williams %R`);
-    L.push(`        high14_w = dataframe['high'].rolling(window=14).max()`);
-    L.push(`        low14_w = dataframe['low'].rolling(window=14).min()`);
-    L.push(`        dataframe['willr'] = -100 * (high14_w - dataframe['close']) / (high14_w - low14_w)`);
-    L.push(``);
-  }
-
-  // VWAP
-  if (hasInd('vwap')) {
-    L.push(`        # VWAP (approximation using cumulative)`);
-    L.push(`        tp_v = (dataframe['high'] + dataframe['low'] + dataframe['close']) / 3`);
-    L.push(`        cum_tpv = (tp_v * dataframe['volume']).rolling(window=20).sum()`);
-    L.push(`        cum_vol = dataframe['volume'].rolling(window=20).sum()`);
-    L.push(`        dataframe['vwap'] = cum_tpv / cum_vol`);
-    L.push(``);
-  }
-
-  // Ichimoku
-  if (hasInd('ichimoku')) {
-    L.push(`        # Ichimoku Cloud`);
-    L.push(`        nine_high = dataframe['high'].rolling(window=9).max()`);
-    L.push(`        nine_low = dataframe['low'].rolling(window=9).min()`);
-    L.push(`        dataframe['tenkan'] = (nine_high + nine_low) / 2`);
-    L.push(`        twentysix_high = dataframe['high'].rolling(window=26).max()`);
-    L.push(`        twentysix_low = dataframe['low'].rolling(window=26).min()`);
-    L.push(`        dataframe['kijun'] = (twentysix_high + twentysix_low) / 2`);
-    L.push(`        dataframe['senkou_a'] = ((dataframe['tenkan'] + dataframe['kijun']) / 2).shift(26)`);
-    L.push(`        fiftytwo_high = dataframe['high'].rolling(window=52).max()`);
-    L.push(`        fiftytwo_low = dataframe['low'].rolling(window=52).min()`);
-    L.push(`        dataframe['senkou_b'] = ((fiftytwo_high + fiftytwo_low) / 2).shift(26)`);
-    L.push(``);
-  }
-
-  // Volume SMA (always if requested or default)
-  if (hasInd('volume_sma') || hasInd('volume')) {
-    L.push(`        # Volume SMA`);
-    L.push(`        dataframe['vol_sma'] = dataframe['volume'].rolling(window=20).mean()`);
-  }
-
-  // OBV
-  if (hasInd('obv')) {
-    L.push(`        # OBV (On Balance Volume)`);
-    L.push(`        import numpy as np`);
-    L.push(`        obv_sign = np.where(dataframe['close'] > dataframe['close'].shift(), 1, np.where(dataframe['close'] < dataframe['close'].shift(), -1, 0))`);
-    L.push(`        dataframe['obv'] = (obv_sign * dataframe['volume']).cumsum()`);
-    L.push(`        dataframe['obv_sma'] = dataframe['obv'].rolling(window=20).mean()`);
-    L.push(``);
-  }
-
-  if (any) {
-    L.push(``);
-    L.push(`        # AiCoin data columns (default values for backtest)`);
-    if (has('funding_rate')) {
-      L.push(`        dataframe['funding_rate'] = 0.0`);
-      L.push(`        dataframe['funding_extreme'] = 0`);
-    }
-    if (has('ls_ratio'))         L.push(`        dataframe['ls_ratio'] = 0.5`);
-    if (has('big_orders'))       L.push(`        dataframe['whale_signal'] = 0.0`);
-    if (has('open_interest'))    L.push(`        dataframe['oi_rising'] = 0`);
-    if (has('liquidation_map'))  L.push(`        dataframe['liq_bias'] = 0.0`);
-    L.push(``);
-    L.push(`        if self.dp and self.dp.runmode.value in ('live', 'dry_run'):`);
-    L.push(`            import time`);
-    L.push(`            now = time.time()`);
-    L.push(`            if now - self._ac_last_update > 300:`);
-    L.push(`                self._update_aicoin_data(metadata)`);
-    L.push(`                self._ac_last_update = now`);
-    L.push(``);
-    if (has('funding_rate')) {
-      L.push(`            dataframe.iloc[-1, dataframe.columns.get_loc('funding_rate')] = self._ac_funding_rate`);
-      L.push(`            t = self.funding_threshold.value`);
-      L.push(`            if self._ac_funding_rate > t:`);
-      L.push(`                dataframe.iloc[-1, dataframe.columns.get_loc('funding_extreme')] = 1`);
-      L.push(`            elif self._ac_funding_rate < -t:`);
-      L.push(`                dataframe.iloc[-1, dataframe.columns.get_loc('funding_extreme')] = -1`);
-    }
-    if (has('ls_ratio'))
-      L.push(`            dataframe.iloc[-1, dataframe.columns.get_loc('ls_ratio')] = self._ac_ls_ratio`);
-    if (has('big_orders'))
-      L.push(`            dataframe.iloc[-1, dataframe.columns.get_loc('whale_signal')] = self._ac_whale_signal`);
-    if (has('open_interest'))
-      L.push(`            dataframe.iloc[-1, dataframe.columns.get_loc('oi_rising')] = 1 if self._ac_oi_rising else 0`);
-    if (has('liquidation_map'))
-      L.push(`            dataframe.iloc[-1, dataframe.columns.get_loc('liq_bias')] = self._ac_liq_bias`);
-  }
-
-  L.push(``);
-  L.push(`        return dataframe`);
-  L.push(``);
-
-  // _update_aicoin_data
-  if (any) {
-    L.push(`    def _update_aicoin_data(self, metadata: dict):`);
-    L.push(`        try:`);
-    L.push(`            import sys, os`);
-    L.push(`            _sd = os.path.dirname(os.path.abspath(__file__))`);
-    L.push(`            if _sd not in sys.path:`);
-    L.push(`                sys.path.insert(0, _sd)`);
-    L.push(`            from aicoin_data import AiCoinData, ccxt_to_aicoin`);
-    L.push(`            ac = AiCoinData(cache_ttl=300)`);
-    L.push(`            pair = metadata.get('pair', 'BTC/USDT:USDT')`);
-    L.push(`            exchange = self.config.get('exchange', {}).get('name', 'binance')`);
-    L.push(`            symbol = ccxt_to_aicoin(pair, exchange)`);
-    if (has('open_interest'))
-      L.push(`            base = pair.split('/')[0]`);
-    L.push(``);
-
-    if (has('funding_rate')) {
-      L.push(`            try:`);
-      L.push(`                data = ac.funding_rate(symbol, weighted=True, limit='5')`);
-      L.push(`                items = data.get('data', [])`);
-      L.push(`                if isinstance(items, list) and items:`);
-      L.push(`                    latest = items[0]`);
-      L.push(`                    if isinstance(latest, dict) and 'close' in latest:`);
-      L.push(`                        self._ac_funding_rate = float(latest['close']) * 100`);
-      L.push(`                        logger.info(f"AiCoin funding rate for {pair}: {self._ac_funding_rate:.4f}%")`);
-      L.push(`            except Exception as e:`);
-      L.push(`                logger.debug(f"AiCoin funding_rate unavailable: {e}")`);
-      L.push(``);
-    }
-    if (has('ls_ratio')) {
-      L.push(`            try:`);
-      L.push(`                ls = ac.ls_ratio()`);
-      L.push(`                detail = ls.get('data', {}).get('detail', {})`);
-      L.push(`                if detail:`);
-      L.push(`                    ratio = float(detail.get('last', 1.0))`);
-      L.push(`                    self._ac_ls_ratio = max(0.0, min(1.0, ratio / (1.0 + ratio)))`);
-      L.push(`                    logger.info(f"AiCoin L/S ratio: {self._ac_ls_ratio:.2f}")`);
-      L.push(`            except Exception as e:`);
-      L.push(`                logger.debug(f"AiCoin ls_ratio unavailable: {e}")`);
-      L.push(``);
-    }
-    if (has('big_orders')) {
-      L.push(`            try:`);
-      L.push(`                orders = ac.big_orders(symbol)`);
-      L.push(`                if 'data' in orders and isinstance(orders['data'], list):`);
-      L.push(`                    buy_vol = sum(float(o.get('amount', 0)) for o in orders['data'] if o.get('side', '').lower() in ('buy', 'bid', 'long'))`);
-      L.push(`                    sell_vol = sum(float(o.get('amount', 0)) for o in orders['data'] if o.get('side', '').lower() in ('sell', 'ask', 'short'))`);
-      L.push(`                    total = buy_vol + sell_vol`);
-      L.push(`                    if total > 0:`);
-      L.push(`                        self._ac_whale_signal = (buy_vol - sell_vol) / total`);
-      L.push(`                        logger.info(f"AiCoin whale signal for {pair}: {self._ac_whale_signal:.2f}")`);
-      L.push(`            except Exception as e:`);
-      L.push(`                logger.debug(f"AiCoin big_orders unavailable: {e}")`);
-      L.push(``);
-    }
-    if (has('open_interest')) {
-      L.push(`            try:`);
-      L.push(`                oi_data = ac.open_interest(base, interval='${tf}', limit='10')`);
-      L.push(`                if 'data' in oi_data and isinstance(oi_data['data'], list) and len(oi_data['data']) >= 2:`);
-      L.push(`                    def get_oi(item):`);
-      L.push(`                        for k in ('openInterest', 'open_interest', 'oi', 'value'):`);
-      L.push(`                            if k in item: return float(item[k])`);
-      L.push(`                        return 0`);
-      L.push(`                    first_oi, last_oi = get_oi(oi_data['data'][0]), get_oi(oi_data['data'][-1])`);
-      L.push(`                    if first_oi > 0:`);
-      L.push(`                        change = (last_oi - first_oi) / first_oi * 100`);
-      L.push(`                        self._ac_oi_rising = change > 3.0`);
-      L.push(`                        logger.info(f"AiCoin OI: rising={self._ac_oi_rising}, change={change:.2f}%")`);
-      L.push(`            except Exception as e:`);
-      L.push(`                logger.debug(f"AiCoin OI unavailable: {e}")`);
-      L.push(``);
-    }
-    if (has('liquidation_map')) {
-      L.push(`            try:`);
-      L.push(`                liq = ac.liquidation_map(symbol, cycle='24h')`);
-      L.push(`                if 'data' in liq and isinstance(liq['data'], dict):`);
-      L.push(`                    d = liq['data']`);
-      L.push(`                    long_liq = float(d.get('longLiquidation', d.get('long_vol', 0)))`);
-      L.push(`                    short_liq = float(d.get('shortLiquidation', d.get('short_vol', 0)))`);
-      L.push(`                    total = long_liq + short_liq`);
-      L.push(`                    if total > 0:`);
-      L.push(`                        self._ac_liq_bias = (short_liq - long_liq) / total`);
-      L.push(`                        logger.info(f"AiCoin liq bias for {pair}: {self._ac_liq_bias:.2f}")`);
-      L.push(`            except Exception as e:`);
-      L.push(`                logger.debug(f"AiCoin liquidation_map unavailable: {e}")`);
-      L.push(``);
-    }
-
-    L.push(`        except ImportError:`);
-    L.push(`            logger.warning("aicoin_data module not found. Run ft-deploy.mjs to install.")`);
-    L.push(`        except Exception as e:`);
-    L.push(`            logger.warning(f"AiCoin data error: {e}")`);
-    L.push(``);
-  }
-
-  // populate_entry_trend
-  // Build entry conditions based on selected indicators
-  const longC = [];
-  const shortC = [];
-
-  // Custom entry logic takes priority
-  if (entryLogic && entryLogic.long) {
-    longC.push(`(${entryLogic.long})`);
-    shortC.push(`(${entryLogic.short || entryLogic.long})`);
-  } else {
-    // Auto-generate conditions from indicators
-    if (hasInd('rsi')) {
-      longC.push("(dataframe['rsi'] < self.rsi_buy.value)");
-      shortC.push("(dataframe['rsi'] > self.rsi_sell.value)");
-    }
-    if (hasInd('ema')) {
-      longC.push("(dataframe['ema_fast'] > dataframe['ema_slow'])");
-      shortC.push("(dataframe['ema_fast'] < dataframe['ema_slow'])");
-    }
-    if (hasInd('sma')) {
-      longC.push("(dataframe['sma_short'] > dataframe['sma_long'])");
-      shortC.push("(dataframe['sma_short'] < dataframe['sma_long'])");
-    }
-    if (hasInd('macd')) {
-      longC.push("(dataframe['macd'] > dataframe['macd_signal'])");
-      shortC.push("(dataframe['macd'] < dataframe['macd_signal'])");
-    }
-    if (hasInd('stochastic') || hasInd('kdj')) {
-      longC.push("(dataframe['stoch_k'] < self.stoch_buy.value)");
-      shortC.push("(dataframe['stoch_k'] > self.stoch_sell.value)");
-    }
-    if (hasInd('bb') || hasInd('bollinger')) {
-      longC.push("(dataframe['close'] < dataframe['bb_lower'])");
-      shortC.push("(dataframe['close'] > dataframe['bb_upper'])");
-    }
-    if (hasInd('cci')) {
-      longC.push("(dataframe['cci'] < self.cci_buy.value)");
-      shortC.push("(dataframe['cci'] > self.cci_sell.value)");
-    }
-    if (hasInd('williams_r') || hasInd('willr')) {
-      longC.push("(dataframe['willr'] < self.willr_buy.value)");
-      shortC.push("(dataframe['willr'] > self.willr_sell.value)");
-    }
-    if (hasInd('adx')) {
-      longC.push("(dataframe['adx'] > 20) & (dataframe['plus_di'] > dataframe['minus_di'])");
-      shortC.push("(dataframe['adx'] > 20) & (dataframe['minus_di'] > dataframe['plus_di'])");
-    }
-    if (hasInd('ichimoku')) {
-      longC.push("(dataframe['close'] > dataframe['senkou_a']) & (dataframe['close'] > dataframe['senkou_b'])");
-      shortC.push("(dataframe['close'] < dataframe['senkou_a']) & (dataframe['close'] < dataframe['senkou_b'])");
-    }
-    if (hasInd('vwap')) {
-      longC.push("(dataframe['close'] < dataframe['vwap'])");
-      shortC.push("(dataframe['close'] > dataframe['vwap'])");
-    }
-    if (hasInd('obv')) {
-      longC.push("(dataframe['obv'] > dataframe['obv_sma'])");
-      shortC.push("(dataframe['obv'] < dataframe['obv_sma'])");
-    }
-    if (hasInd('volume_sma') || hasInd('volume')) {
-      longC.push("(dataframe['volume'] > dataframe['vol_sma'] * 0.5)");
-      shortC.push("(dataframe['volume'] > dataframe['vol_sma'] * 0.5)");
-    }
-    // Fallback if no conditions
-    if (longC.length === 0) {
-      longC.push("(dataframe['volume'] > 0)");
-      shortC.push("(dataframe['volume'] > 0)");
-    }
-  }
-
-  // Add AiCoin conditions
-  if (has('funding_rate'))     { longC.push("(dataframe['funding_extreme'] <= 0)");  shortC.push("(dataframe['funding_extreme'] >= 0)"); }
-  if (has('ls_ratio'))         { longC.push("(dataframe['ls_ratio'] <= 0.55)");      shortC.push("(dataframe['ls_ratio'] >= 0.45)"); }
-  if (has('big_orders'))       { longC.push("(dataframe['whale_signal'] >= -0.3)");  shortC.push("(dataframe['whale_signal'] <= 0.3)"); }
-  if (has('liquidation_map'))  { longC.push("(dataframe['liq_bias'] >= -0.3)");      shortC.push("(dataframe['liq_bias'] <= 0.3)"); }
-
-  L.push(`    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:`);
-  L.push(`        dataframe.loc[`);
-  longC.forEach((c, i) => L.push(`            ${c}${i < longC.length - 1 ? ' &' : ','}`));
-  L.push(`            'enter_long'] = 1`);
-  L.push(``);
-  L.push(`        dataframe.loc[`);
-  shortC.forEach((c, i) => L.push(`            ${c}${i < shortC.length - 1 ? ' &' : ','}`));
-  L.push(`            'enter_short'] = 1`);
-  L.push(``);
-  L.push(`        return dataframe`);
-  L.push(``);
-
-  // populate_exit_trend
-  L.push(`    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:`);
-  if (exitLogic && exitLogic.long) {
-    L.push(`        dataframe.loc[`);
-    L.push(`            (${exitLogic.long}),`);
-    L.push(`            'exit_long'] = 1`);
-    L.push(`        dataframe.loc[`);
-    L.push(`            (${exitLogic.short || exitLogic.long}),`);
-    L.push(`            'exit_short'] = 1`);
-  } else {
-    // Auto-generate exit conditions
-    if (hasInd('rsi')) {
-      L.push(`        dataframe.loc[`);
-      L.push(`            (dataframe['rsi'] > 70),`);
-      L.push(`            'exit_long'] = 1`);
-      L.push(`        dataframe.loc[`);
-      L.push(`            (dataframe['rsi'] < 30),`);
-      L.push(`            'exit_short'] = 1`);
-    } else if (hasInd('stochastic') || hasInd('kdj')) {
-      L.push(`        dataframe.loc[`);
-      L.push(`            (dataframe['stoch_k'] > 80),`);
-      L.push(`            'exit_long'] = 1`);
-      L.push(`        dataframe.loc[`);
-      L.push(`            (dataframe['stoch_k'] < 20),`);
-      L.push(`            'exit_short'] = 1`);
-    } else if (hasInd('cci')) {
-      L.push(`        dataframe.loc[`);
-      L.push(`            (dataframe['cci'] > 150),`);
-      L.push(`            'exit_long'] = 1`);
-      L.push(`        dataframe.loc[`);
-      L.push(`            (dataframe['cci'] < -150),`);
-      L.push(`            'exit_short'] = 1`);
-    } else if (hasInd('macd')) {
-      L.push(`        dataframe.loc[`);
-      L.push(`            (dataframe['macd'] < dataframe['macd_signal']),`);
-      L.push(`            'exit_long'] = 1`);
-      L.push(`        dataframe.loc[`);
-      L.push(`            (dataframe['macd'] > dataframe['macd_signal']),`);
-      L.push(`            'exit_short'] = 1`);
-    } else {
-      // Fallback: ROI/stoploss handles exits
-      L.push(`        dataframe.loc[`);
-      L.push(`            (dataframe['volume'] > 0),  # exits handled by ROI/stoploss`);
-      L.push(`            'exit_long'] = 0  # placeholder`);
-      L.push(`        dataframe.loc[`);
-      L.push(`            (dataframe['volume'] > 0),`);
-      L.push(`            'exit_short'] = 0`);
-    }
-  }
-  L.push(`        return dataframe`);
-  L.push(``);
-
-  return L.join('\n');
-}
-
-// ─── Sample strategy (pure pandas, no TA-Lib dependency) ───
-
-const SAMPLE_STRATEGY = `# Sample RSI + EMA strategy for Freqtrade
-# Uses pure pandas — no TA-Lib C library required
-from freqtrade.strategy import IStrategy
-from pandas import DataFrame
-
-
-class SampleStrategy(IStrategy):
-    INTERFACE_VERSION = 3
-    timeframe = '5m'
-    can_short = True
-
-    minimal_roi = {"0": 0.05, "30": 0.03, "60": 0.02, "120": 0.01}
-
-    stoploss = -0.03
-    trailing_stop = True
-    trailing_stop_positive = 0.01
-    trailing_stop_positive_offset = 0.02
-
-    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # RSI (pure pandas, no talib)
-        delta = dataframe['close'].diff()
-        gain = delta.clip(lower=0).rolling(window=14).mean()
-        loss = (-delta.clip(upper=0)).rolling(window=14).mean()
-        rs = gain / loss
-        dataframe['rsi'] = 100 - (100 / (1 + rs))
-
-        # EMA (pure pandas)
-        dataframe['ema_fast'] = dataframe['close'].ewm(span=8, adjust=False).mean()
-        dataframe['ema_slow'] = dataframe['close'].ewm(span=21, adjust=False).mean()
-        return dataframe
-
-    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe.loc[
-            (dataframe['rsi'] < 35) &
-            (dataframe['ema_fast'] > dataframe['ema_slow']) &
-            (dataframe['volume'] > 0),
-            'enter_long'] = 1
-        dataframe.loc[
-            (dataframe['rsi'] > 65) &
-            (dataframe['ema_fast'] < dataframe['ema_slow']) &
-            (dataframe['volume'] > 0),
-            'enter_short'] = 1
-        return dataframe
-
-    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe.loc[
-            (dataframe['rsi'] > 70),
-            'exit_long'] = 1
-        dataframe.loc[
-            (dataframe['rsi'] < 30),
-            'exit_short'] = 1
-        return dataframe
-`;
-
-// ─── CLI ───
-
+// ─── CLI ─────────────────────────────────────────────────────────
 const [action, ...rest] = process.argv.slice(2);
 if (!action || !actions[action]) {
   console.log(`Usage: node ft-deploy.mjs <action> [json-params]\nActions: ${Object.keys(actions).join(', ')}`);
   process.exit(1);
 }
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
-actions[action](params).then(r => {
-  r._reminder = 'IMPORTANT: Always use ft-deploy.mjs for ALL Freqtrade operations. NEVER use Docker commands.';
+actions[action](params).then((r) => {
+  // 提示 — 只在 host 模式 / 老用法时强调走脚本; coinclaw 模式 daemon 已经
+  // 在 supervisord 管, 用户从 chat agent 调用脚本就是正确路径.
+  if (!ENV) r._reminder = 'IMPORTANT: Always use ft-deploy.mjs for ALL Freqtrade operations. NEVER use Docker commands.';
   console.log(JSON.stringify(r, null, 2));
-}).catch(e => {
+}).catch((e) => {
   console.error(e.message);
-  console.error('_reminder: Always use ft-deploy.mjs for ALL Freqtrade operations. NEVER use Docker commands.');
   process.exit(1);
 });

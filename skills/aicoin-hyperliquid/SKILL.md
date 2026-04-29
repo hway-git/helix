@@ -4,7 +4,7 @@ description: "This skill should be used when the user asks about Hyperliquid wha
 metadata: { "openclaw": { "primaryEnv": "AICOIN_ACCESS_KEY_ID", "requires": { "bins": ["node"] }, "homepage": "https://www.aicoin.com/opendata", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
 ---
 
-> **⚠️ 运行脚本: 必须先 cd 到本 SKILL.md 所在目录再执行。示例: `cd ~/.openclaw/workspace/skills/aicoin-hyperliquid && node scripts/hl-market.mjs ...`**
+> **运行脚本**: 从 SKILL.md 所在目录运行 `node scripts/<file>.mjs <action>`. 三引擎(OpenClaw / Hermes / Claude Code)容器自动加载 skill, 直接 `cd` 到 skill 目录即可.
 
 # AiCoin Hyperliquid
 
@@ -35,7 +35,7 @@ Get at https://www.aicoin.com/opendata. See [Paid Feature Guide](#paid-feature-g
 
 **安全说明：** AiCoin API Key 仅用于获取 Hyperliquid 链上分析数据，无法进行任何交易操作。如需在 Hyperliquid 上交易，需单独配置钱包私钥（见 aicoin-trading skill）。所有密钥仅保存在本地设备 `.env` 文件中，不会上传到任何服务器。
 
-`.env` auto-loaded from: cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env`.
+**`.env` 加载位置**: CoinClaw 容器自动从 `/workspace/.env` (Hermes/CC) 或 `/home/node/.openclaw/workspace/.env` (OpenClaw) 加载; 本地 host 模式从 cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env` 加载.
 
 ## Quick Reference
 
@@ -190,6 +190,5 @@ When a script returns 304 or 403: **Do NOT retry.** Tell the user:
 | 高级版 | $299/mo | + OI summary/top, taker delta, trader discover |
 | 专业版 | $699/mo | + OI history |
 
-3. Add to `.env`: `AICOIN_ACCESS_KEY_ID=xxx` / `AICOIN_ACCESS_SECRET=xxx`
-4. Scripts auto-load `.env` from cwd, `~/.openclaw/workspace/.env`, or `~/.openclaw/.env`.
-5. **MUST tell the user**: AiCoin API Key 仅用于获取 Hyperliquid 链上分析数据，无法进行任何交易操作。如需在 Hyperliquid 上交易，需要单独配置钱包私钥（见 aicoin-trading skill）。所有密钥仅保存在你的本地设备 `.env` 文件中，不会上传到任何服务器。
+3. CoinClaw 用户在 web UI EnvSection 添加 `AICOIN_ACCESS_KEY_ID` / `AICOIN_ACCESS_SECRET`; 本地用户写到 `.env`.
+4. **MUST tell the user**: AiCoin API Key 仅用于获取 Hyperliquid 链上分析数据，无法进行任何交易操作。如需在 Hyperliquid 上交易，需要单独配置钱包私钥（见 aicoin-trading skill）。所有密钥仅保存在你的本地设备 `.env` 文件中，不会上传到任何服务器。

@@ -1,81 +1,135 @@
 ---
 name: aicoin-freqtrade
-description: "Use when user asks about writing trading strategies, backtesting, deploying Freqtrade bots, quantitative trading, or strategy optimization. Trigger words: 'write strategy', 'create strategy', 'backtest', 'deploy Freqtrade', 'deploy bot', 'quantitative', 'hyperopt', '写策略', '创建策略', '回测', '部署', '量化', '策略优化'. This skill provides: (1) create_strategy quick generator with 17 indicators, (2) AiCoin Python SDK (aicoin_data.py) for integrating real market data into custom strategies, (3) deploy/backtest/hyperopt tools. ALWAYS actively use AiCoin data (funding rate, L/S ratio, whale orders, etc.) in strategies when the user's API key supports it. For prices/charts use aicoin-market. For trading use aicoin-trading. For Hyperliquid use aicoin-hyperliquid."
+description: "Use when user asks about Freqtrade — strategy creation, backtest, hyperopt, switching strategies / pairs / dry-run mode, querying live bot status / balance / open positions / 盈亏. Trigger words: 'write strategy', 'create strategy', 'backtest', 'switch strategy', 'switch to live', 'open positions', 'P&L', '写策略', '创建策略', '回测', '部署策略', '切策略', '切实盘', '当前持仓', '今天赚多少', '盈亏'. In CoinClaw containers (OpenClaw / Hermes / Claude Code) freqtrade is a supervisord-managed daemon on :8080 — this skill auto-detects engine + paths via lib/coinclaw-env.mjs and never spawns competing freqtrade processes. Outside CoinClaw it falls back to host mode (clone freqtrade + nohup). For prices/charts use aicoin-market. For exchange trading use aicoin-trading. For Hyperliquid use aicoin-hyperliquid."
 metadata: { "openclaw": { "primaryEnv": "AICOIN_ACCESS_KEY_ID", "requires": { "bins": ["node"] }, "homepage": "https://www.aicoin.com/opendata", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
 ---
 
-> **⚠️ 运行脚本: 必须先 cd 到本 SKILL.md 所在目录再执行。示例: `cd ~/.openclaw/workspace/skills/aicoin-freqtrade && node scripts/ft-deploy.mjs ...`**
-
 # AiCoin Freqtrade
 
-Freqtrade strategy creation, backtesting, and deployment powered by [AiCoin Open API](https://www.aicoin.com/opendata).
+Freqtrade 策略 / 回测 / 部署 / 实时控制 — 跨 CoinClaw 三引擎自动适配。
 
-## Critical Rules
+## 关键原则(读完再动手)
 
-1. **ALWAYS use `ft-deploy.mjs backtest`** for backtesting. NEVER write custom backtest scripts. NEVER use simulated/fabricated data.
-2. **ALWAYS use `ft-deploy.mjs deploy`** for deployment. NEVER use Docker. NEVER manually run `freqtrade` commands.
-3. **NEVER manually edit Freqtrade config files.** Use `ft-deploy.mjs` actions.
-4. **NEVER manually run `freqtrade trade`, `freqtrade status`, `freqtrade backtesting`, `source .venv/bin/activate`, or `pip install freqtrade`.** Always use ft-deploy.mjs or ft.mjs instead.
-5. **ACTIVELY use AiCoin data** in strategies. Check what data the user's API key supports and integrate it. Don't only use basic indicators when richer data is available.
-6. **Freqtrade 不支持网格策略(grid)。** 用户问网格时，说明限制并建议用趋势跟踪或区间策略替代。
+### 一、CoinClaw 容器里 freqtrade 是常驻 daemon
 
-## Two Ways to Create Strategies
+OpenClaw / Hermes / Claude Code 三个引擎容器都通过 supervisord 把 freqtrade 起为常驻进程, 监听 `127.0.0.1:8080`, 默认跑 `NoOpStrategy`(空跑). **不要自己起 freqtrade 进程** — 会跟 daemon 抢端口, dashboard 立刻 offline.
 
-### Option A: Quick Generator (for simple strategies)
+正确流程是: 写策略文件 → 调 `ft-deploy.mjs deploy {"strategy":"..."}` → 脚本改 config + 重启 daemon. dashboard 会自动刷出新策略.
 
-`create_strategy` generates a ready-to-backtest strategy file with selected indicators and optional AiCoin data:
+`scripts/ft.mjs` + `scripts/ft-deploy.mjs` 内置三引擎自动识别(`lib/coinclaw-env.mjs`), 路径 / auth / supervisord socket 都自动解析, **agent 不用关心是哪个引擎**.
+
+### 二、永远先调 freqtrade REST API, 不要"自己计算"
+
+| 用户问 | 必须先调 |
+|---|---|
+| 现在赚多少 / 总盈亏 / 今天涨了多少 | `ft.mjs profit` (`/api/v1/profit`) |
+| 持仓 / 现在开了哪些 | `ft.mjs trades_open` (`/api/v1/status`) |
+| 余额 / 资金多少 | `ft.mjs balance` (`/api/v1/balance`) |
+| 跑的什么策略 / 当前模式 | `ft.mjs daemon_info` 或 `config` |
+| 历史交易 / 已平仓 | `ft.mjs trades_history` |
+| 单交易对绩效 | `ft.mjs profit_per_pair` |
+
+**dashboard 数字对齐规则(关键)**: 用户问"赚了多少"必须报告**两个数字**:
+- **已平仓累计盈亏** = `profit_closed_coin` (USDT) — **dashboard 顶栏的累计盈亏 = 这个**
+- **含浮动总盈亏** = `profit_all_coin` (USDT) — 已平仓 + 当前持仓的浮动盈亏
+
+只调 `/status` 拿持仓浮动盈亏会漏掉已平仓部分, 导致跟 dashboard 数字不一致 — 用户立刻发现, 信任度归零.
+
+### 三、切策略 / 切实盘 / 切交易对必须走脚本
+
+config.json 是 daemon 启动时读一次, 手动改完不会自动生效. 必须用:
+
+| 操作 | 命令 | 是否需要 daemon 重启 |
+|---|---|---|
+| 切策略 | `ft.mjs set_strategy {"strategy":"X"}` | 必须重启 (~30s) |
+| 切交易对 | `ft.mjs set_pairs {"pairs":[...]}` | 不重启, `reload_config` 即可 |
+| 切实盘/模拟 | `ft.mjs set_dry_run {"dry_run":false}` | 必须重启 |
+| reload 配置 | `ft.mjs reload` | 不重启 |
+
+或者一次完成所有变更: `ft-deploy.mjs deploy {"strategy":"X","pairs":["BTC/USDT:USDT"],"dry_run":false}`.
+
+**实盘切换必须强 confirm**: 切到 `dry_run=false` 之前先确认 .env 里的交易所 key 是对的, 余额可控, 用户明确同意.
+
+### 四、Freqtrade 不支持网格策略 (grid)
+
+用户问网格时直接说明限制 + 建议趋势跟踪 / 区间策略 / 网格回报模拟器替代. 不要硬写一个伪网格.
+
+## 快速参考
+
+| 任务 | 命令 |
+|------|------|
+| 看 daemon 状态 + 配置 | `node scripts/ft-deploy.mjs check` 或 `ft.mjs daemon_info` |
+| 看策略列表 | `node scripts/ft-deploy.mjs strategy_list` |
+| 创建策略(快速生成器) | `node scripts/ft-deploy.mjs create_strategy '{"name":"MyStrat","timeframe":"15m","indicators":["rsi","macd","ema"],"aicoin_data":["funding_rate"]}'` |
+| 部署策略到 daemon | `node scripts/ft-deploy.mjs deploy '{"strategy":"MyStrat"}'` |
+| 部署+切实盘 | `node scripts/ft-deploy.mjs deploy '{"strategy":"MyStrat","dry_run":false}'` |
+| 回测 | `node scripts/ft-deploy.mjs backtest '{"strategy":"MyStrat","timeframe":"1h","timerange":"20250101-20260301"}'` |
+| Hyperopt 调参 | `node scripts/ft-deploy.mjs hyperopt '{"strategy":"MyStrat","timeframe":"1h","epochs":100}'` |
+| 看盈亏 | `node scripts/ft.mjs profit` |
+| 看持仓 | `node scripts/ft.mjs trades_open` |
+| 看余额 | `node scripts/ft.mjs balance` |
+| 切交易对 | `node scripts/ft.mjs set_pairs '{"pairs":["BTC/USDT:USDT","ETH/USDT:USDT"]}'` |
+| 重启 daemon | `node scripts/ft.mjs restart` |
+| 看日志 | `node scripts/ft-deploy.mjs logs '{"lines":100}'` |
+
+## 两种创建策略的方式
+
+### A. 快速生成器(简单策略)
+
+`create_strategy` 一条命令生成一个带选定 indicator + 可选 AiCoin 数据的策略文件:
 
 ```bash
 node scripts/ft-deploy.mjs create_strategy '{"name":"MACDStrategy","timeframe":"15m","indicators":["macd","rsi","atr"]}'
 node scripts/ft-deploy.mjs create_strategy '{"name":"WhaleStrat","timeframe":"15m","indicators":["rsi","macd"],"aicoin_data":["funding_rate","ls_ratio"]}'
 ```
 
-Available `indicators`: `rsi`, `bb`, `ema`, `sma`, `macd`, `stochastic`/`kdj`, `atr`, `adx`, `cci`, `williams_r`, `vwap`, `ichimoku`, `volume_sma`, `obv`
+可选 `indicators`: `rsi`, `bb`, `ema`, `sma`, `macd`, `stochastic`/`kdj`, `atr`, `adx`, `cci`, `williams_r`, `vwap`, `ichimoku`, `volume_sma`, `obv`.
 
-### Option B: Write Custom Strategy Code (for complex/custom strategies)
+可选 `aicoin_data`: `funding_rate` (基础版), `ls_ratio` (基础版), `big_orders` (标准版), `open_interest` (专业版), `liquidation_map` (高级版).
 
-When users need custom logic beyond what `create_strategy` offers, write a Python strategy file directly. **Use the AiCoin Python SDK** (`aicoin_data.py`, auto-installed at `~/.freqtrade/user_data/strategies/`) to integrate real market data.
+### B. 自定义 Python 策略 (复杂逻辑)
 
-Strategy file location: `~/.freqtrade/user_data/strategies/YourStrategyName.py`
+直接写 `.py` 文件到 daemon 的 strategy 目录. 三引擎该目录不同, **从 `daemon_info` 拿**或用 `Write` 工具写到下面任一路径(脚本会自动用 `/api/v1/show_config` 验证):
 
-#### AiCoin Python SDK Reference
+| 引擎 | strategy 目录 |
+|---|---|
+| OpenClaw | `~/.openclaw/workspace/strategies/` |
+| Hermes | `/workspace/strategies/` |
+| Claude Code | `/workspace/strategies/` |
+
+用 AiCoin Python SDK (`aicoin_data.py`, image build 时已复制到上面目录, 也由 `create_strategy` 兜底拷贝):
 
 ```python
 from aicoin_data import AiCoinData, ccxt_to_aicoin
 
-ac = AiCoinData(cache_ttl=300)  # Auto-loads API keys from .env
-
-# Convert CCXT pair to AiCoin symbol
+ac = AiCoinData(cache_ttl=300)
 symbol = ccxt_to_aicoin("BTC/USDT:USDT", "binance")  # → "btcswapusdt:binance"
 
-# ── Free tier (no key needed) ──
-ac.coin_ticker("bitcoin")             # Real-time price
-ac.kline(symbol, period="3600")       # K-line data (period in seconds)
-ac.hot_coins("market")                # Trending coins
+# 免费版
+ac.coin_ticker("bitcoin")
+ac.kline(symbol, period="3600")
+ac.hot_coins("market")
 
-# ── 基础版 ($29/mo) ──
-ac.funding_rate(symbol)               # Funding rate history
-ac.funding_rate(symbol, weighted=True) # Volume-weighted cross-exchange rate
-ac.ls_ratio()                         # Aggregated long/short ratio
+# 基础版 ($29/mo)
+ac.funding_rate(symbol)
+ac.funding_rate(symbol, weighted=True)
+ac.ls_ratio()
 
-# ── 标准版 ($79/mo) ──
-ac.big_orders(symbol)                 # Whale/large orders
-ac.agg_trades(symbol)                 # Aggregated large trades
+# 标准版 ($79/mo)
+ac.big_orders(symbol)
+ac.agg_trades(symbol)
 
-# ── 高级版 ($299/mo) ──
-ac.liquidation_map(symbol, cycle="24h")    # Liquidation heatmap
-ac.liquidation_history(symbol)              # Liquidation history
+# 高级版 ($299/mo)
+ac.liquidation_map(symbol, cycle="24h")
 
-# ── 专业版 ($699/mo) ──
-ac.open_interest("BTC", interval="15m")    # Aggregated open interest
-ac.ai_analysis(["BTC"])                     # AI-powered analysis
+# 专业版 ($699/mo)
+ac.open_interest("BTC", interval="15m")
+ac.ai_analysis(["BTC"])
 ```
 
-#### Complete Strategy Template (copy and customize)
+#### 完整模板
 
 ```python
-# MyCustomStrategy - Description
-# Uses AiCoin data in live/dry_run mode
 from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter
 from pandas import DataFrame
 import logging, time
@@ -83,7 +137,7 @@ import logging, time
 logger = logging.getLogger(__name__)
 
 
-class MyCustomStrategy(IStrategy):
+class MyStrategy(IStrategy):
     INTERFACE_VERSION = 3
     timeframe = '15m'
     can_short = True
@@ -94,18 +148,13 @@ class MyCustomStrategy(IStrategy):
     trailing_stop_positive = 0.02
     trailing_stop_positive_offset = 0.03
 
-    # Hyperopt parameters
     rsi_buy = IntParameter(20, 40, default=30, space='buy')
     rsi_sell = IntParameter(60, 80, default=70, space='sell')
 
-    # AiCoin data cache
     _ac_funding_rate = 0.0
-    _ac_ls_ratio = 0.5
-    _ac_whale_signal = 0.0
     _ac_last_update = 0.0
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # === Technical Indicators (always available) ===
         # RSI
         delta = dataframe['close'].diff()
         gain = delta.clip(lower=0).rolling(window=14).mean()
@@ -113,108 +162,44 @@ class MyCustomStrategy(IStrategy):
         rs = gain / loss
         dataframe['rsi'] = 100 - (100 / (1 + rs))
 
-        # MACD
-        ema12 = dataframe['close'].ewm(span=12, adjust=False).mean()
-        ema26 = dataframe['close'].ewm(span=26, adjust=False).mean()
-        dataframe['macd'] = ema12 - ema26
-        dataframe['macd_signal'] = dataframe['macd'].ewm(span=9, adjust=False).mean()
-
-        # EMA
-        dataframe['ema_fast'] = dataframe['close'].ewm(span=8, adjust=False).mean()
-        dataframe['ema_slow'] = dataframe['close'].ewm(span=21, adjust=False).mean()
-
-        # === AiCoin Data (live/dry_run only) ===
+        # AiCoin 数据 (live/dry_run only, backtest 用默认值 0.0)
         dataframe['funding_rate'] = 0.0
-        dataframe['ls_ratio'] = 0.5
-        dataframe['whale_signal'] = 0.0
-
         if self.dp and self.dp.runmode.value in ('live', 'dry_run'):
             now = time.time()
-            if now - self._ac_last_update > 300:  # Update every 5 min
+            if now - self._ac_last_update > 300:
                 self._update_aicoin_data(metadata)
                 self._ac_last_update = now
-            # Apply latest AiCoin data to current candle
             dataframe.iloc[-1, dataframe.columns.get_loc('funding_rate')] = self._ac_funding_rate
-            dataframe.iloc[-1, dataframe.columns.get_loc('ls_ratio')] = self._ac_ls_ratio
-            dataframe.iloc[-1, dataframe.columns.get_loc('whale_signal')] = self._ac_whale_signal
 
         return dataframe
 
     def _update_aicoin_data(self, metadata: dict):
-        """Fetch latest AiCoin data. Called every 5 min in live mode."""
         try:
             import sys, os
             _sd = os.path.dirname(os.path.abspath(__file__))
             if _sd not in sys.path:
                 sys.path.insert(0, _sd)
             from aicoin_data import AiCoinData, ccxt_to_aicoin
-
             ac = AiCoinData(cache_ttl=300)
             pair = metadata.get('pair', 'BTC/USDT:USDT')
             exchange = self.config.get('exchange', {}).get('name', 'binance')
             symbol = ccxt_to_aicoin(pair, exchange)
-
-            # Funding rate (基础版)
-            try:
-                data = ac.funding_rate(symbol, weighted=True, limit='5')
-                items = data.get('data', [])
-                if isinstance(items, list) and items:
-                    latest = items[0]
-                    if isinstance(latest, dict) and 'close' in latest:
-                        self._ac_funding_rate = float(latest['close']) * 100
-            except Exception as e:
-                logger.debug(f"AiCoin funding_rate unavailable: {e}")
-
-            # Long/short ratio (基础版)
-            try:
-                ls = ac.ls_ratio()
-                detail = ls.get('data', {}).get('detail', {})
-                if detail:
-                    ratio = float(detail.get('last', 1.0))
-                    self._ac_ls_ratio = max(0.0, min(1.0, ratio / (1.0 + ratio)))
-            except Exception as e:
-                logger.debug(f"AiCoin ls_ratio unavailable: {e}")
-
-            # Whale orders (标准版)
-            try:
-                orders = ac.big_orders(symbol)
-                if 'data' in orders and isinstance(orders['data'], list):
-                    buy_vol = sum(float(o.get('amount', 0)) for o in orders['data']
-                                 if o.get('side', '').lower() in ('buy', 'bid', 'long'))
-                    sell_vol = sum(float(o.get('amount', 0)) for o in orders['data']
-                                  if o.get('side', '').lower() in ('sell', 'ask', 'short'))
-                    total = buy_vol + sell_vol
-                    if total > 0:
-                        self._ac_whale_signal = (buy_vol - sell_vol) / total
-            except Exception as e:
-                logger.debug(f"AiCoin big_orders unavailable: {e}")
-
-        except ImportError:
-            logger.warning("aicoin_data module not found. Run ft-deploy.mjs deploy to install.")
+            data = ac.funding_rate(symbol, weighted=True, limit='5')
+            items = data.get('data', [])
+            if isinstance(items, list) and items:
+                self._ac_funding_rate = float(items[0].get('close', 0)) * 100
         except Exception as e:
             logger.warning(f"AiCoin data error: {e}")
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Long: RSI oversold + MACD bullish + AiCoin confirmations
         dataframe.loc[
             (dataframe['rsi'] < self.rsi_buy.value) &
-            (dataframe['macd'] > dataframe['macd_signal']) &
-            (dataframe['ema_fast'] > dataframe['ema_slow']) &
-            (dataframe['ls_ratio'] <= 0.55) &        # More shorts = contrarian long
-            (dataframe['whale_signal'] >= -0.3) &     # Whales not heavily selling
             (dataframe['volume'] > 0),
             'enter_long'] = 1
-
-        # Short: RSI overbought + MACD bearish + AiCoin confirmations
         dataframe.loc[
             (dataframe['rsi'] > self.rsi_sell.value) &
-            (dataframe['macd'] < dataframe['macd_signal']) &
-            (dataframe['ema_fast'] < dataframe['ema_slow']) &
-            (dataframe['ls_ratio'] >= 0.45) &        # More longs = contrarian short
-            (dataframe['whale_signal'] <= 0.3) &      # Whales not heavily buying
             (dataframe['volume'] > 0),
             'enter_short'] = 1
-
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -223,100 +208,116 @@ class MyCustomStrategy(IStrategy):
         return dataframe
 ```
 
-### AiCoin Data Integration Patterns
+写完后用 `deploy {"strategy":"MyStrategy"}` 让 daemon 切到这个策略.
 
-Use these patterns to integrate specific AiCoin data into entry/exit conditions:
+### AiCoin 数据集成模式
 
-| AiCoin Data | Signal Logic | Tier |
-|-------------|-------------|------|
-| `funding_rate` | Rate > 0.01% → market over-leveraged long → short signal; Rate < -0.01% → long signal | 基础版 |
-| `ls_ratio` | Ratio < 0.45 (more shorts) → contrarian long; Ratio > 0.55 (more longs) → contrarian short | 基础版 |
-| `big_orders` | `(buy_vol - sell_vol) / total > 0.3` → whale buying → long; `< -0.3` → short | 标准版 |
-| `open_interest` | OI rising + price rising = healthy trend; OI rising + price falling = weak, likely reversal | 专业版 |
-| `liquidation_map` | More short liquidations above → short squeeze likely → long; vice versa | 高级版 |
+| AiCoin 数据 | 信号逻辑 | 套餐 |
+|---|---|---|
+| `funding_rate` | 大于 0.01% → 多头过度 → 空信号; 小于 -0.01% → 多信号 | 基础版 |
+| `ls_ratio` | 小于 0.45 (空头多) → 反向做多; 大于 0.55 → 反向做空 | 基础版 |
+| `big_orders` | `(buy_vol-sell_vol)/total > 0.3` → 鲸鱼买入做多 | 标准版 |
+| `open_interest` | OI 涨 + 价涨 = 健康趋势; OI 涨 + 价跌 = 反转 | 专业版 |
+| `liquidation_map` | 上方爆仓多 → 多头挤压 → 做多 | 高级版 |
 
-### Key Rule: Backtest Behavior
+### 回测注意事项
 
-AiCoin real-time data is **NOT available for historical periods**. In backtest mode:
-- AiCoin columns use **default values** (funding_rate=0.0, ls_ratio=0.5, whale_signal=0.0)
-- This means backtest results reflect **technical indicators only**
-- Live/dry_run trading uses **real AiCoin data**, which should improve performance vs backtest
+AiCoin 实时数据**不在历史区间内可用**. 回测时:
 
-Always explain this to the user when showing backtest results.
+- AiCoin 列用默认值 (`funding_rate=0.0`, `ls_ratio=0.5`, `whale_signal=0.0`)
+- 回测结果只反映**技术指标**部分
+- live/dry_run 跑的时候才用真实 AiCoin 数据, 表现应该比回测好
 
-## Quick Reference
+向用户报告回测结果时必须主动说明这点, 不要让用户以为回测包含了 AiCoin 信号.
 
-| Task | Command |
-|------|---------|
-| Quick-generate strategy | `node scripts/ft-deploy.mjs create_strategy '{"name":"MyStrat","timeframe":"15m","indicators":["rsi","macd"],"aicoin_data":["funding_rate"]}'` |
-| Backtest | `node scripts/ft-deploy.mjs backtest '{"strategy":"MyStrat","timeframe":"1h","timerange":"20250101-20260301","pairs":["ETH/USDT:USDT"]}'` |
-| Deploy (dry-run) | `node scripts/ft-deploy.mjs deploy '{"strategy":"MyStrat","pairs":["BTC/USDT:USDT"]}'` |
-| Deploy (live) | `node scripts/ft-deploy.mjs deploy '{"strategy":"MyStrat","dry_run":false,"pairs":["BTC/USDT:USDT"]}'` |
-| Hyperopt | `node scripts/ft-deploy.mjs hyperopt '{"strategy":"MyStrat","timeframe":"1h","timerange":"20250101-20260301","epochs":100}'` |
-| Strategy list | `node scripts/ft-deploy.mjs strategy_list` |
-| Bot status | `node scripts/ft-deploy.mjs status` |
-| Bot logs | `node scripts/ft-deploy.mjs logs '{"lines":50}'` |
+## 脚本 API
 
-## Setup
+### `scripts/ft-deploy.mjs` — 策略 / 回测 / 部署
 
-**Prerequisites:** Python 3.11+ and git.
+| Action | 参数示例 |
+|---|---|
+| `check` | (无) — 返回 daemon 状态 + 配置 + 余额 |
+| `daemon_info`(在 ft.mjs) | (无) — 单调用拿全 |
+| `deploy` | `{"strategy":"MyStrat"}` 或 `{"strategy":"MyStrat","dry_run":false,"pairs":["BTC/USDT:USDT"]}` |
+| `create_strategy` | `{"name":"MyStrat","timeframe":"15m","indicators":["rsi","macd"],"aicoin_data":["funding_rate"]}` |
+| `backtest` | `{"strategy":"MyStrat","timeframe":"1h","timerange":"20250101-20260301","pairs":["ETH/USDT:USDT"]}` |
+| `hyperopt` | `{"strategy":"MyStrat","timeframe":"1h","epochs":100}` |
+| `download_data` | `{"timeframe":"1h","timerange":"20250101-"}` |
+| `strategy_list` | (无) |
+| `backtest_results` | (无) — 列最近 10 个回测结果文件名 |
+| `start` / `stop` | (无) — coinclaw 模式调 supervisorctl, host 模式管 PID |
+| `status` / `logs` | `{"lines":100}` |
+| `update` / `remove` | coinclaw 模式 no-op (提示用 helm upgrade / web UI 删 instance) |
 
-`.env` auto-loaded from (first found wins): cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env`
+### `scripts/ft.mjs` — 实时控制 (REST + 配置变更)
 
-**Exchange keys** (for live/dry-run):
-```
-BINANCE_API_KEY=xxx
-BINANCE_API_SECRET=xxx
-```
+| Action | 用途 |
+|---|---|
+| `daemon_info` | 一次拿 strategy / mode / pairs / open trades 数量 |
+| `profit` | 已平仓累计 + 含浮动总盈亏 (回答盈亏类问题必须先调) |
+| `trades_open` | 当前持仓 (调 /status) |
+| `trades_history` | 已平仓交易 |
+| `balance` | 余额 |
+| `profit_per_pair` | 每交易对绩效 |
+| `daily` / `weekly` / `monthly` | 时间维度统计 |
+| `force_enter` / `force_exit` | 手动开/平仓 |
+| `set_strategy` | 切策略 (改 config + 重启 daemon) |
+| `set_pairs` | 改交易对白名单 (reload, 不重启) |
+| `set_dry_run` | 切实盘/模拟 (改 config + 重启 daemon) |
+| `restart` | 重启 freqtrade daemon (supervisorctl + kill 兜底) |
+| `reload` | reload_config 而不重启 |
+| `start` / `stop` / `ping` / `version` / `health` | 标准 REST |
+| `logs` | freqtrade 自带 /logs 接口 |
 
-**AiCoin API key** (for AiCoin data in strategies):
+### `scripts/ft-dev.mjs` — 调试 (回测 / 蜡烛 / 策略详情)
+
+`backtest_start` / `backtest_status` / `backtest_history` / `candles_live` / `candles_analyzed` / `strategy_list` / `strategy_get` / `whitelist` / `blacklist` 等.
+
+## 环境变量与认证
+
+`.env` 自动加载顺序:
+
+- coinclaw 容器内: `/workspace/.env` (Hermes/CC) 或 `/home/node/.openclaw/workspace/.env` (OpenClaw)
+- host 模式: cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env`
+
+freqtrade REST 认证: `freqtrade-api.mjs` 自动从容器内 `.ft_api_pass` 文件读密码, **agent 不用配 FREQTRADE_USERNAME / FREQTRADE_PASSWORD**. 用户也可以通过 `.env` 覆盖.
+
+交易所 key 在 web UI 的 EnvSection 里配置, 写到 .env 后 entrypoint 会自动 patch 进 freqtrade `config.json`. **agent 不要直接读 .env 给用户看交易所 key**.
+
+AiCoin Open API key (用于策略集成 AiCoin 数据):
 ```
 AICOIN_ACCESS_KEY_ID=your-key-id
 AICOIN_ACCESS_SECRET=your-secret
 ```
-Get at https://www.aicoin.com/opendata
 
-## Scripts
+## 付费功能引导
 
-### ft-deploy.mjs — Deployment & Strategy
+返回 304 / 403 时 **不要重试**, 直接告诉用户:
 
-| Action | Params |
-|--------|--------|
-| `check` | None |
-| `deploy` | `{"strategy":"MACDKDJStrategy","dry_run":true,"pairs":["BTC/USDT:USDT"]}` — **strategy 必填，指定策略名** |
-| `backtest` | `{"strategy":"Name","timeframe":"1h","timerange":"20250101-20260301","pairs":["ETH/USDT:USDT"]}` — pairs 可选，默认用 config 中的交易对 |
-| `hyperopt` | `{"strategy":"Name","timeframe":"1h","epochs":100}` |
-| `create_strategy` | `{"name":"Name","timeframe":"15m","indicators":["rsi","macd"],"aicoin_data":["funding_rate"]}` |
-| `strategy_list` | None |
-| `backtest_results` | None — lists recent backtest result files |
-| `start` / `stop` / `status` / `logs` | None / `{"lines":50}` |
-
-### ft.mjs — Bot Control (requires running process)
-
-`ping`, `start`, `stop`, `balance`, `profit`, `trades_open`, `trades_history`, `force_enter`, `force_exit`, `daily`, `weekly`, `monthly`, `stats`
-
-### ft-dev.mjs — Dev Tools (requires running process)
-
-`backtest_start`, `backtest_status`, `candles_live`, `candles_analyzed`, `strategy_list`, `strategy_get`
-
-## Cross-Skill References
-
-| Need | Use |
-|------|-----|
-| Prices, K-lines, market data | **aicoin-market** |
-| Exchange trading (buy/sell) | **aicoin-trading** |
-| Hyperliquid whale tracking | **aicoin-hyperliquid** |
-
-## Paid Feature Guide
-
-When 304/403: **Do NOT retry.** Guide the user:
-
-| Tier | Price | Data for Strategies |
-|------|-------|---------------------|
-| 免费版 | $0 | Pure technical indicators |
+| 套餐 | 价格 | 用途 |
+|---|---|---|
+| 免费版 | $0 | 纯技术指标 |
 | 基础版 | $29/mo | + `funding_rate`, `ls_ratio` |
 | 标准版 | $79/mo | + `big_orders`, `agg_trades` |
 | 高级版 | $299/mo | + `liquidation_map` |
 | 专业版 | $699/mo | + `open_interest`, `ai_analysis` |
 
-Configure: `AICOIN_ACCESS_KEY_ID` + `AICOIN_ACCESS_SECRET` in `.env`
+获取地址: https://www.aicoin.com/opendata
+
+## 跨 skill 引用
+
+| 用户问 | 用 |
+|---|---|
+| 单纯查行情 / K 线 / 新闻 / 资金费率 (不开仓) | **aicoin-market** |
+| 直接下单 / 开仓 / 平仓 (不通过 freqtrade) | **aicoin-trading** |
+| Hyperliquid 鲸鱼 / 持仓 / 清算 | **aicoin-hyperliquid** |
+| 链上 DEX swap / 钱包余额 / gas | **aicoin-onchain** |
+| 余额 / 持仓 / 注册 / API key 配置 (账户类) | **aicoin-account** |
+
+## 常见 pitfall
+
+- **不要 `cat /workspace/.ft_api_pass`** 把内部 daemon 密码贴到 chat — 直接用 `ft.mjs` 调 REST, 脚本内部读密码不会泄漏.
+- **不要在 chat 里 echo 用户的交易所 key** — 这些是高敏数据, 引导用户去 EnvSection 配置.
+- **不要自己心算 RSI / MACD / EMA** — freqtrade 算出的值跟你心算结果会差, 用 `ft-dev.mjs candles_analyzed` 拿 daemon 的真实指标.
+- **不要"先 stop daemon 再 freqtrade trade ... &"** — 那是绕过 supervisord, 下次 dashboard 看到的还是老的 daemon 状态. 必须用 `set_strategy` / `deploy` / `restart`.
+- **回测拿不到 AiCoin 数据是正常的** — 不要造假 CSV 喂回测, 直接告诉用户回测只反映技术指标. 见根 AGENTS.md 的"数据准确性铁则".
