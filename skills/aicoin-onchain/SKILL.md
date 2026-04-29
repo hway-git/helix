@@ -4,7 +4,7 @@ description: "Use this skill for on-chain DEX operations: token search, swap quo
 metadata: { "openclaw": { "primaryEnv": "OKX_API_KEY", "requires": { "bins": ["node"] }, "homepage": "https://web3.okx.com", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
 ---
 
-> **Working directory: `cd` to this SKILL.md directory before running scripts. Example: `cd ~/.openclaw/workspace/skills/aicoin-onchain && node scripts/token.mjs ...`**
+> **运行脚本**: 从 SKILL.md 所在目录运行 `node scripts/<file>.mjs <action>`. 三引擎(OpenClaw / Hermes / Claude Code)容器自动加载 skill, 直接 `cd` 到 skill 目录即可.
 
 # AiCoin Onchain
 
@@ -180,11 +180,16 @@ The scripts accept human-readable chain names:
 
 Requires OKX Web3 API credentials. Free at [OKX Developer Portal](https://web3.okx.com/onchain-os/dev-portal).
 
-Add to `.env`:
+CoinClaw 用户在 web UI EnvSection 添加; 本地用户写到 `.env`:
 ```
 OKX_API_KEY=your-api-key
 OKX_SECRET_KEY=your-secret-key
 OKX_PASSPHRASE=your-passphrase
 ```
+
+`.env` 自动加载位置:
+- CoinClaw Hermes / Claude Code: `/workspace/.env`
+- CoinClaw OpenClaw: `/home/node/.openclaw/workspace/.env`
+- 本地: cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env`
 
 **Security notice**: OKX Web3 API Key is for reading market data and generating unsigned swap calldata. It cannot access your wallet funds or sign transactions. All signing happens locally.

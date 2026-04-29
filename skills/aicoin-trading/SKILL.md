@@ -4,7 +4,7 @@ description: "下单交易工具。严格规则：(1) 所有订单必须通过 n
 metadata: { "openclaw": { "primaryEnv": "AICOIN_ACCESS_KEY_ID", "requires": { "bins": ["node"] }, "homepage": "https://www.aicoin.com/opendata", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
 ---
 
-> **⚠️ 运行脚本: 必须先 cd 到本 SKILL.md 所在目录再执行。示例: `cd ~/.openclaw/workspace/skills/aicoin-trading && node scripts/exchange.mjs ...`**
+> **运行脚本**: 从 SKILL.md 所在目录运行 `node scripts/exchange.mjs <action>`. 三引擎(OpenClaw / Hermes / Claude Code)容器自动加载 skill, 直接 `cd` 到 skill 目录即可.
 
 # AiCoin Trading — 下单专用
 
