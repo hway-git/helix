@@ -28,8 +28,11 @@ Crypto market data toolkit powered by [AiCoin Open API](https://www.aicoin.com/o
 下面这些端点 agent **不要重试**, 不是用户参数错, 是 AiCoin 后端的问题。脚本已经做了本地拦截或上游故障 catch, 调用时会拿到 `实测结论` 字段, 把它原文转告用户即可。
 
 - **`features.strategy_signal`** — 后端长期 broken, 公开 signal_key 格式 (`depth_win_one` 等) 实测全 400。脚本本地无条件拦截, 不会真调上游。**替代**: `change_signal` (异动信号) / `signal_alert` (用户配置预警)
-- **`market.stock_company`** — 后端偶发 500 (实测 COIN/MSTR 都触发)。**替代**: `stock_quotes` 拿价格/市值/公司名汇总
-- **`airdrop.detail`** — 后端偶发 500 (三种 type+token 组合都试过)。**替代**: `airdrop.list / banner / calendar` 拿简要信息
+- **`coin.liquidation_history`** — AiCoin 网关 stgw 偶发 HTTP 502 (实测重试 3 次都失败的窗口)。脚本会带 upstreamFaultHint 提示重试或联系客服。**替代**: `coin.liquidation_map` (清算地图) / `coin.estimated_liquidation` (预估清算)
+- **`market.stock_company`** — 后端偶发 500 / 也可能恢复正常 (状态不稳)。MSTR 实测有时通有时 500。拿到 `实测结论` 字段时按提示转告用户, 否则正常使用。
+- **`airdrop.detail`** — 当前 key 档位不够时上游返 **HTTP 403 付费墙** (不是 500 后端故障)。脚本会带"档位不够"提示。**替代**: `airdrop.list / banner / calendar` 拿简要信息
+- **`drop_radar.detail`** — 同 airdrop.detail, 当前 key 档位不够时返 403。**替代**: `drop_radar.list` 已含项目基础信息
+- **`hl-trader.accounts`** (aicoin-hyperliquid) — 后端偶发 500。**替代**: `statistics + batch_clearinghouse_state`
 - **上游 5xx 通用响应** — 任何端点拿到 HTTP 502/503/504 是 AiCoin 网关临时故障(可重试 1-2 分钟), 拿到 500/501/505+ 是后端异常(直接引导用户联系 service@aicoin.com), 不要让用户改参数
 
 ## Quick Reference
@@ -115,7 +118,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
-| `search` | **搜索币种，获取 dbKey。** 不确定 symbol 格式时先用这个查。默认返 20/页, 全库 ~350 个币要翻几页才全。 | 免费版 | `{"search":"BTC"}` Optional: `market`, `trade_type`, `page`, `page_size` (例: `{"search":"BTC","page":"2","page_size":"50"}`) |
+| `search` | **搜索币种，获取 dbKey。** 不确定 symbol 格式时先用这个查。默认返 20/页, 全库 ~350 个币要翻几页才全。**返回字段陷阱**: 每条 `dbKeys` 是**单 string** (例 `"btcswapusdt:binance,btcusdt:okex,..."` 逗号分隔), **不是 array** — 别 `JSON.parse` 也别 `.map`。`price` 字段是 **CNY** 不是 USD (跟 `coin_ticker.price_cny` 量级一致, 写错会贵 ~6.8 倍)。要 USD 转 `coin_ticker '{"coin_list":"<coin_key>"}'`。 | 免费版 | `{"search":"BTC"}` Optional: `market`, `trade_type`, `page`, `page_size` (例: `{"search":"BTC","page":"2","page_size":"50"}`) |
 | `api_key_info` | **AiCoin API Key status + security notice. Run when user asks about key config/safety.** | 免费版 | None |
 | `update_key` | **更换 API Key（先验证再写入 .env）。禁止直接编辑 .env 更换 key。** | 免费版 | `{"key_id":"xxx","secret":"xxx"}` |
 | `coin_ticker` | Real-time prices. **返回字段单位**: 所有数值都是 string (要 `parseFloat`); `degree_24h_usd`/`degree_7day_usd` 等"涨跌"字段**本身就是百分数** (如 `"-0.61"` = -0.61%, 不要 ×100); `price_usd` 绝对价 USD; `supply_usd` 市值 USD; `trade_24h_usd` 24h 成交额 USD; `fundNetIn_24h_usd` 净流入 USD (负数=流出) | 免费版 | `{"coin_list":"bitcoin,ethereum"}` |
@@ -142,7 +145,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | `futures_interest` | Futures OI ranking | 基础版 | `{"language":"cn"}` |
 | `depth_latest` | Real-time depth | 标准版 | `{"symbol":"btcswapusdt:binance"}` |
 | `indicator_kline` | Indicator K-line | 高级版 | `{"symbol":"btcswapusdt:binance","indicator_key":"fundflow","period":"3600"}` Optional: `open_time`, `since` |
-| `indicator_pairs` | Indicator pairs | 高级版 | `{"indicator_key":"fundflow"}` |
+| `indicator_pairs` | Indicator pairs. **`indicator_key` + `coinType` 双必填**, 缺 coinType 上游返 400 (不是脚本本地拦截, 直接报错)。 | 高级版 | `{"indicator_key":"fundflow","coinType":"USDT"}` |
 | `index_list` | Index list | 高级版 | None |
 | `index_price` | Index price | 高级版 | `{"key":"i:diniw:ice"}` |
 | `index_info` | Index details | 高级版 | `{"key":"i:diniw:ice"}` |
@@ -169,7 +172,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | `pair_list` | Pair list (必填 market) | 基础版 | `{"market":"binance","currency":"USDT"}` |
 | `grayscale_trust` | Grayscale trust 总览 (GBTC/ETHE) | 标准版 | None |
 | `gray_scale` | Grayscale 单币持仓细分。脚本自动把 BTC/ETH 转 bitcoin/ethereum。返空 detail 时脚本加 `_note`, 引导改用 `grayscale_trust`。 | 标准版 | `{"coins":"bitcoin,ethereum"}` |
-| `signal_alert` | ⚠️ **返的是当前账号在 AiCoin 网页端配置过的预警**, 不是全市场实时触发列表。用户没配过任何预警时返空; 配了 ETH 预警就只看到 ETH 触发。要看全市场技术指标实时触发, AiCoin Open API **暂未暴露**, 用户引导去 aicoin.com 网页端"指标信号"板块。 | 标准版 | None |
+| `signal_alert` | ⚠️ **返的是当前账号在 AiCoin 网页端配置过的预警**, 不是全市场实时触发列表。用户没配过任何预警时返空; 配了 ETH 预警就只看到 ETH 触发。**返回字段**: `tp_key` (币:周期) / `sub_type` (信号子类) / `side` (long/short) / `ews_price` / `ews_time`。**没有 `winRate` 字段** (那是 strategy_signal 才有的)。要看全市场技术指标实时触发, AiCoin Open API **暂未暴露**, 用户引导去 aicoin.com 网页端"指标信号"板块。 | 标准版 | None |
 | `signal_alert_list` | 同 `signal_alert` — 返当前账号订阅的预警列表 (不是全市场) | 专业版 | None |
 | `signal_config` | Alert config — 系统支持的指标 + 周期字典 (MA/MACD/BOLL/TD/RSI/KDJ 等), **不返实时触发**, 只是配置目录 | 标准版 | `{"language":"cn"}` |
 | `strategy_signal` | 见 [Known Issues](#known-issues-broken--临时不稳的端点) — 后端 broken 脚本本地拦截 | 标准版 | — |
@@ -185,7 +188,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
-| `news_rss` | RSS news feed | 免费版 | `{"page":"1"}` |
+| `news_rss` | RSS news feed. **返 XML/RSS 不是 JSON** — 脚本用 `apiGetText` 返 `{contentType, body}`, body 是 XML 字符串。agent 收到后**不要 JSON.parse**, 直接转告用户原文或用 XML parser 解析。 | 免费版 | `{"page":"1"}` |
 | `news_list` | News list | 基础版 | `{"page":"1","page_size":"20"}` |
 | `flash_list` | Industry flash news | 基础版 | `{"language":"cn"}` |
 | `newsflash` | AiCoin flash news | 标准版 | `{"language":"cn"}` |
@@ -213,7 +216,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
-| `all` | **综合查询（推荐）** — 同时查交易所空投+链上早期项目，合并返回 | 基础版 | `{"page_size":"20"}` Optional: `status`, `keyword`, `lan` |
+| `all` | **综合查询（推荐）** — 同时查交易所空投+链上早期项目，合并返回。**返回结构特殊**: 顶层 key 是**中文** (`{交易所空投: {...}, 链上早期项目: {...}}`), 不是标准 `{data:...}`。agent 别按 `data` 取字段。 | 基础版 | `{"page_size":"20"}` Optional: `status`, `keyword`, `lan` |
 | `list` | Airdrop projects list (multi-source) | 基础版 | `{"source":"all","status":"ongoing","page":"1","page_size":"20","exchange":"binance"}` |
 | `detail` | Airdrop detail — 见 [Known Issues](#known-issues-broken--临时不稳的端点) 后端偶发 500 | 标准版 | `{"type":"hodler","token":"SIGN"}` |
 | `banner` | Hot airdrop banners | 基础版 | `{"limit":"5"}` |
@@ -226,7 +229,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
-| `list` | Project list with filters | 基础版 | `{"page":"1","page_size":"20","status":"CONFIRMED","keyword":"airdrop"}` |
+| `list` | Project list with filters. 用 `filters` action 拿到合法的 status/board/eco 选项再筛, 别瞎传 (例 `status:"CONFIRMED"+keyword:"airdrop"` 组合实测筛 0 条)。 | 基础版 | `{"page":"1","page_size":"20"}` Optional: `status`/`activity_type`/`reward_type`/`keyword`/`board_keys`/`eco_keys`/`sort_by` |
 | `detail` | Project detail（自动包含团队+X关注） | 基础版 | `{"airdrop_id":"xxx"}` |
 | `widgets` | Statistics overview | 基础版 | `{"lan":"cn"}` |
 | `filters` | Available filter options | 基础版 | `{"lan":"cn"}` |

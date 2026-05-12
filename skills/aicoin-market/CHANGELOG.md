@@ -55,6 +55,33 @@ agent 调用时容易把上游故障当用户参数错,误导用户。
 - `search` 支持 page/page_size 翻页 (全库 ~350 个币)
 - `hot_coins` key 字典只 `defi` 通, `meme/new` 返空 — 用户问 meme 走 `coin.search`
 
+## 2026-05 收尾 — 9 并行 agent 测试 (145 endpoints) 发现的坑
+
+### 脚本层 silent wrong 修复 (commit 9a4762c)
+
+- `whale_events` 上游 coin 过滤不严, 本地按 coin 严格剔除非请求币种 + _note
+- `completed_trades_by_time` Coin (大写) 字段, 小写 coin 兼容自动转
+- `current_pos_history` 缺 coin 拼 /undefined silent OK → 本地校验
+- `fills / completed_trades / orders_latest / filled_orders / twap_states` 缺 address 静默拿空 → 统一加 requireAddress
+- `news_rss` 端点返 XML/RSS, lib 新增 `apiGetText` 函数, news_rss 改用返 { contentType, body 字符串 }
+- `huobipro` 加进 big_orders/agg_trades BLACKLIST
+- `stock_quotes` 收 data:null 时主动加 _note (告知"加密概念股专用")
+- `drop_radar.detail` 区分 403 付费墙 vs 真 airdrop_id 错, 不再统一报"airdrop_id 无效"
+
+### SKILL.md 字段陷阱补全
+
+- `coin.search`: `dbKeys` 单 string (不是 array), `price` 是 CNY (不是 USD, 6.8 倍量级差)
+- `features.signal_alert`: 返回字段是 tp_key / sub_type / side / ews_price / ews_time, **没有 winRate**
+- `market.indicator_pairs`: `coinType` 必填
+- `airdrop.all`: 顶层 key 是中文 (`交易所空投`/`链上早期项目`), 不是标准 `data`
+- `drop_radar.list`: 不要瞎传 status+keyword, 用 filters 拿合法选项
+
+### Known Issues 刷新
+
+- `coin.liquidation_history` 加入 (网关偶发 502)
+- `airdrop.detail / drop_radar.detail` 实际是 403 付费墙不是 500 后端故障 (改提示文)
+- `market.stock_company` 状态不稳, 弱化"必定 broken"措辞
+
 ## 2026-05 后续 — sub-agent 互动测试挖到的字段语义陷阱
 
 7 题互动测试 (主线程出题 / sub-agent 用 SKILL.md 答) 发现 2 个 SKILL.md 没说明的字段陷阱:
