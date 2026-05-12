@@ -12,9 +12,19 @@ cli({
     if (topBy) p.topBy = topBy; if (take) p.take = take;
     return apiGet('/api/upgrade/v2/hl/whales/open-positions', p);
   },
-  whale_events: ({ coin, limit } = {}) => {
+  whale_events: async ({ coin, limit } = {}) => {
     const p = {}; if (coin) p.coin = coin; if (limit) p.limit = limit;
-    return apiGet('/api/upgrade/v2/hl/whales/latest-events', p);
+    const json = await apiGet('/api/upgrade/v2/hl/whales/latest-events', p);
+    // 实测: 上游 coin 参数过滤不严, 传 BTC 仍可能混入 SOL/其他币的鲸鱼事件。
+    // 本地按 coin 严格过滤一次, 保证 agent 拿到的就是请求的币种。
+    if (coin && Array.isArray(json?.data)) {
+      const before = json.data.length;
+      json.data = json.data.filter(ev => String(ev?.coin || '').toUpperCase() === String(coin).toUpperCase());
+      if (json.data.length !== before) {
+        json._note = `whale_events 上游 coin 参数过滤不严, 本地已剔除 ${before - json.data.length} 条非 ${coin} 事件 (原返 ${before} 条 → 过滤后 ${json.data.length} 条)。`;
+      }
+    }
+    return json;
   },
   whale_directions: ({ coin } = {}) => {
     const p = {}; if (coin) p.coin = coin;
@@ -36,8 +46,9 @@ cli({
     const p = {}; if (interval) p.interval = interval;
     return apiGet('/api/upgrade/v2/hl/liquidations/stat-by-coin', p);
   },
-  liq_top_positions: ({ coin, interval, limit }) => {
-    const p = { coin, interval }; if (limit) p.limit = limit;
+  liq_top_positions: ({ coin, interval, limit } = {}) => {
+    // 实测: interval 必填, 不传 400。默认 1h (滚动窗口分析最常用粒度)。
+    const p = { coin, interval: interval || '1h' }; if (limit) p.limit = limit;
     return apiGet('/api/upgrade/v2/hl/liquidations/top-positions', p);
   },
   oi_summary: () => apiGet('/api/upgrade/v2/hl/open-interest/summary'),
@@ -49,8 +60,9 @@ cli({
     const p = {}; if (interval) p.interval = interval;
     return apiGet(`/api/upgrade/v2/hl/open-interest/history/${coin}`, p);
   },
-  taker_delta: ({ coin, interval }) => {
-    const p = {}; if (interval) p.interval = interval;
+  taker_delta: ({ coin, interval } = {}) => {
+    // 实测: interval 必填。默认 1h (跟 taker_klines/liq_top_positions 对齐)。
+    const p = { interval: interval || '1h' };
     return apiGet(`/api/upgrade/v2/hl/accumulated-taker-delta/${coin}`, p);
   },
   taker_klines: ({ coin, interval = '4h', startTime, endTime, limit } = {}) => {
