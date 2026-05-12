@@ -19,7 +19,10 @@ Crypto market data toolkit powered by [AiCoin Open API](https://www.aicoin.com/o
 3. **NEVER run `env` or `printenv`** — leaks API secrets into logs.
 4. **Scripts auto-load `.env`** — never pass credentials inline.
 5. **Reply in the user's language.** Chinese input = all-Chinese response (titles, headings, analysis).
-6. **On 304/403 error — STOP, do NOT retry.** This is a paid feature. Follow the [Paid Feature Guide](#paid-feature-guide) to help the user upgrade.
+6. **遇到 304/403 错误**: 先看响应里附带的字段判断, **不要一律当付费墙** (lib 已经帮你区分了三种 304):
+   - `频率限制提示` 字段 → 限流。**不是付费问题, 不要让用户升级**。等 60 秒重试, 或把多个币种 batch 合并到一次调用 (例 coin_list 用 CSV `"bitcoin,ethereum,solana"`), 避免并发同一接口。
+   - `付费功能提示` / `升级指南` 字段 → 真付费墙。按 [Paid Feature Guide](#paid-feature-guide) 引导升级, 不重试。
+   - `参数错误提示` 字段 → 参数错 (symbol 写错 / coin_key 不存在 等), 检查格式不重试, 别让用户以为是付费问题。
 7. **更换 API Key 只能用 `update_key` 命令。** 禁止直接编辑 .env、禁止用 gateway/edit 工具改 key。`update_key` 会先验证 key 有效才写入。
 8. **响应里出现 `实测结论` / `_note` 字段时把原文转告用户**,不要重试同一参数 — 这些是脚本帮你把上游故障 / 数据空 / API 设计限制翻译成了清晰提示, 重试会浪费用户时间。
 
@@ -53,6 +56,15 @@ Crypto market data toolkit powered by [AiCoin Open API](https://www.aicoin.com/o
   - `kline` 输入参数 `symbol` (同 dbkey 格式)
   - `pair_ticker` 输入参数 `key_list` (string, CSV, dbkey 格式)
   - 大单 `big_orders` / `agg_trades` 输入参数 `symbol` (dbkey 格式)
+- **funding_rate / open_interest 必须用永续 dbkey, 不是现货**:
+  - 现货 `btcusdt:okex` / `btcusdt:binance` → funding_rate 静默返空 (上游不报错)
+  - 永续 `btcswapusdt:okcoinfutures` / `btcswapusdt:binance` → 才有数据
+  - 弄不清就 `search` 一下, dbkey 里带 `swap` / `perp` / `fut` 的才是合约。
+  - 另外 AiCoin funding_rate 和 open_interest **只覆盖 BTC**, 传 SOL/ETH 等会被脚本本地拦截并引导你用 exchange skill 或 HL skill。
+- **treasury_\* 全套只支持 coin=BTC / ETH**: 传 SOL / DOGE / 其他, 脚本本地拦截。其他币的上市公司持币 AiCoin 没覆盖, 引导用户去 bitcointreasuries.net / ethtreasuries.com。
+- **treasury_entities.share 字段口径在 BTC/ETH 之间不一致**: BTC 实例返小数 (0.012 = 1.2%), ETH 实例返百分数 (1.2 = 1.2%)。**跨币种比 share 前必须用一个已知持有量校准口径**, 不要直接拿数字比大小。脚本会带 `_note` 警告。
+- **新闻/快讯接口可能掺 `is_ad=1` 广告位**: `newsflash` / `flash_list` / `news_list` / `newsflash.list / search` 等接口里, 脚本检测到 is_ad=1 条目会加 `ad_indices` 字段。**总结今日头条时跳过这些 index**, 不要把广告 ("言语社区直播" 等推广) 引用成新闻。
+- **coin_ticker / coin_config 写错 key 静默丢字段**: 后端对 coin_list CSV 里不认识的 key 不报错, 直接丢弃。脚本会本地对比, 拿到响应里出现 `unrecognized_keys: [...]` 字段就说明传错了, 不要把部分数据当全数据用。先用 `search` 查准确的 coin_key (例: AiCoin coin_key 命名无规律 — `RNDRToken` 驼峰 / `fet1` 数字后缀 / `virtualprotocol` 连写, 跟 CoinGecko / CMC 完全不一致)。
 
 ## Quick Reference
 
@@ -63,6 +75,7 @@ Crypto market data toolkit powered by [AiCoin Open API](https://www.aicoin.com/o
 | **项目深度分析** | `node scripts/drop_radar.mjs detail '{"airdrop_id":"xxx"}'` — **自动包含团队+X关注，不要用 web_search** | 基础版 |
 | **查币上了哪些交易所** | `node scripts/coin.mjs search '{"search":"OPN"}'` — 返回全部交易所交易对 | 免费版 |
 | **API Key Info** | `node scripts/coin.mjs api_key_info` — **When user asks about AiCoin API key (配置/安全/能不能下单), ALWAYS run this first.** | 免费版 |
+| **Key Health Check (在线探档)** | `node scripts/coin.mjs api_key_info '{"probe":true}'` — **怀疑 key 失效 / 重复 403 时调用**, 串行测 4 个分档接口 (免费 / 基础 / 标准 / 专业), 返回真实能通的档位 (不只看 .env 里写的档位)。过期 key 即使 .env 标 professional 实测可能只剩免费档。 | 免费版 |
 | **Update API Key** | `node scripts/coin.mjs update_key '{"key_id":"xxx","secret":"xxx"}'` — **更换 key 必须用此命令（自动验证+写入），禁止直接编辑 .env** | 免费版 |
 | BTC price | `node scripts/coin.mjs coin_ticker '{"coin_list":"bitcoin"}'` | 免费版 |
 | K-line | `node scripts/market.mjs kline '{"symbol":"btcusdt:okex","period":"3600","size":"100"}'` | 免费版 |
@@ -99,6 +112,8 @@ node scripts/market.mjs kline '{"symbol":"从search拿到的dbKey","period":"360
 
 **推特/Twitter 讨论：** 用户问推特/Twitter热点时，用 `twitter.mjs latest` 或 `twitter.mjs search`，不要用 newsflash 替代。
 
+**怀疑 key 失效 / 短时间内 ≥ 3 个接口 403：** 不要继续盲打。先跑 `node scripts/coin.mjs api_key_info '{"probe":true}'` 串行测 4 个分档接口，看真实档位。结果只有"免费版"通时, 告诉用户 key 已过期/降权, 引导续费或换 key (`update_key`), 而不是让用户为每个 403 单独升级。
+
 ## Free vs Paid Endpoints
 
 **Free (built-in key, no config needed):** `coin_ticker`, `kline`, `hot_coins`, `exchanges`, `pair_ticker`, `news_rss` — only 6 endpoints.
@@ -112,6 +127,23 @@ node scripts/market.mjs kline '{"symbol":"从search拿到的dbKey","period":"360
 **专业版 ($699/mo) adds:** `ai_analysis`, `open_interest`, `estimated_liquidation`, `historical_depth`, `super_depth`, `stock_quotes`, `stock_top_gainer`, `stock_company`, `treasury_*`, `stock_market`, `signal_alert_list`, `exchange_listing`
 
 Full tier table: `docs/api-tiers.md`
+
+### 免费档 survival kit — 当 health check 探出只剩免费版时怎么干活
+
+key 过期 / 没续费时, 你能用的只有 6 个免费接口 + aicoin-hyperliquid 的 HL 公共 info API (HL 自家免费)。常见问题的免费档解法:
+
+| 用户问 | 免费档怎么答 |
+|---|---|
+| BTC/ETH 价格、24h 涨跌、净流入 | `coin.mjs coin_ticker '{"coin_list":"bitcoin,ethereum,solana"}'` (CSV 一次拿多个币, 别分多次调) |
+| 1h/4h/1d K 线、近期高低点 | `market.mjs kline '{"symbol":"btcusdt:okex","period":"3600","size":"100"}'` |
+| 热门赛道币 (defi 等) | `market.mjs hot_coins '{"key":"defi"}'` — 后端 key 字典有限, 仅 `defi` 通, `meme`/`new` 返空 |
+| 跨所现货价比较 | `coin.mjs pair_ticker '{"key_list":"btcusdt:binance,btcusdt:okex,btcusdt:bybit"}'` |
+| 今日加密新闻 | `news.mjs news_rss` — 返 RSS XML, 自己解析 |
+| 资金费率 / OI / 多空比 / 大单 / 鲸鱼 / 清算 | **拿不到** — 明确告诉用户"这需要 AiCoin 付费档 (从 \$29/月起), 升级地址 https://www.aicoin.com/opendata", 并引导跨 skill: HL 数据用 `aicoin-hyperliquid` (HL 自家免费), 交易所原生数据用 `aicoin-trading` |
+| 上市公司持币 (treasury_\*) | **拿不到** — 引导公开源 bitcointreasuries.net (BTC) / ethtreasuries.com (ETH) |
+| 推特/KOL | **拿不到** — 引导用户直接看 Twitter 或等 RSS 摘要里 KOL 引用 |
+
+**关键**: 免费档下不要假装能给完整分析。诚实说"这些数据当前 key 拿不到", 再用上面的工作流给能给的部分 + 跨 skill / 公开源 fallback。
 
 ## Setup
 
@@ -162,7 +194,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | `exchanges` | Exchange list | 免费版 | None |
 | `ticker` | ⚠️ **返的是平台整体 24h 资金净流入** (`fundNetInCny`/`fundNetInUsd`), **不是单币 OHLC**。单币行情用 `coin.coin_ticker` 或 `features.pair_ticker`。 | 基础版 | `{"market_list":"okex,binance"}` |
 | `futures_interest` | Futures OI ranking | 基础版 | `{"language":"cn"}` |
-| `depth_latest` | Real-time depth | 标准版 | `{"symbol":"btcswapusdt:binance"}` |
+| `depth_latest` | Real-time depth. **交易所覆盖有空洞** (实测 Q8 v2): `binance` / `okex` / `bybit` / `huobipro` 通; `gate` / `coinbase` 返 `Invalid dbKey: depth data not found` 即便 pair_ticker 能查到价。pair_ticker 通 ≠ depth_latest 通。默认 50 档 (够 1 万-100 万 USD 模拟), 更大量级要 `depth_full`。 | 标准版 | `{"symbol":"btcswapusdt:binance"}` |
 | `indicator_kline` | Indicator K-line. **返**嵌套结构 `data.kline_data` 是 **dict** (不是 array) — `{list: [[ts_str, value_str], ...], mapping: ["timestamp","value"]}`。跟普通 `kline.kline_data[]` 直接数组结构**不同**, agent 别复用解析代码。 | 高级版 | `{"symbol":"btcswapusdt:binance","indicator_key":"fundflow","period":"3600"}` Optional: `open_time`, `since` |
 | `indicator_pairs` | Indicator pairs. **`indicator_key` + `coinType` 双必填**, 缺 coinType 上游返 400 (不是脚本本地拦截, 直接报错)。 | 高级版 | `{"indicator_key":"fundflow","coinType":"USDT"}` |
 | `index_list` | Index list | 高级版 | None |
@@ -205,12 +237,17 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 
 ### scripts/news.mjs — News & Content
 
+> **news.mjs 和 newsflash.mjs 怎么区分？**
+> - `news.mjs` 4 个 action (`news_list` / `flash_list` / `newsflash` / `news_rss`) 是**只读拉取**老一代 `/api/v2/content/*` 端点, 接口固定参数少, 拿到的是按时间倒序的快照。
+> - `newsflash.mjs` 3 个 action (`list` / `search` / `detail`) 是 **OpenData** 新一代 `/api/upgrade/v2/content/newsflash/*` 端点, 支持分页 / 关键词搜索 / 多种 tab / 日期跳转, 拿单条 detail 也只能用这个。
+> - 想要"今日头条总览" → `news.mjs flash_list` 一条命令; 想要"按 BTC 关键词找历史快讯" → `newsflash.mjs search`; 想要"翻第 2 页 / 看 5 月 1 号当天" → `newsflash.mjs list`。
+
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
 | `news_rss` | RSS news feed. **返 XML/RSS 不是 JSON** — 脚本用 `apiGetText` 返 `{contentType, body}`, body 是 XML 字符串。agent 收到后**不要 JSON.parse**, 直接转告用户原文或用 XML parser 解析。 | 免费版 | `{"page":"1"}` |
-| `news_list` | News list | 基础版 | `{"page":"1","page_size":"20"}` |
-| `flash_list` | Industry flash news | 基础版 | `{"language":"cn"}` |
-| `newsflash` | AiCoin flash news | 标准版 | `{"language":"cn"}` |
+| `news_list` | News list (老接口, 不分页固定参数) | 基础版 | `{"page":"1","page_size":"20"}` |
+| `flash_list` | 行业快讯总览 (老接口, 今日头条用这个) | 基础版 | `{"language":"cn"}` |
+| `newsflash` | AiCoin flash news (老接口) | 标准版 | `{"language":"cn"}` |
 | `news_detail` | News detail | 标准版 | `{"id":"xxx"}` |
 | `exchange_listing` | Exchange listing announcements | 专业版 | `{"memberIds":"477,1509"}` |
 

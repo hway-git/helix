@@ -80,8 +80,13 @@ Get at https://www.aicoin.com/opendata. See [Paid Feature Guide](#paid-feature-g
 | Liquidation history | `node scripts/hl-market.mjs liq_history '{"coin":"BTC"}'` | 标准版 |
 | OI summary | `node scripts/hl-market.mjs oi_summary` | 高级版 |
 | Trader stats | `node scripts/hl-trader.mjs trader_stats '{"address":"0x...","period":"30"}'` | 标准版 |
-| Smart money | `node scripts/hl-trader.mjs smart_find` | 标准版 |
+| Smart money | `node scripts/hl-trader.mjs smart_find` ⚠️ **拿到的多是做市机器人不是真大户** — 见下警告 | 标准版 |
 | Top open orders | `node scripts/hl-trader.mjs top_open '{"coin":"BTC"}'` | 基础版 |
+
+> ⚠️ **smart_find 是排序"累计交易笔数最多的账户", 不是排序"当前持仓最大"**。Top 几个几乎都是高频量化做市机器人 (positions=602107 意思是历史交易 60 万笔), 跟单意义不大。
+> - 找**真大户当前持仓** → 用 `hl-market whale_positions '{"coin":"BTC"}'` (按当前 perpValue 排序)
+> - 找**最近赚钱的 trader** → 用 `hl-market whale_events` 看大额开/平仓事件
+> - smart_find 适合当**市场情绪信号**用 (高频量化集体动作), 不是跟单标的
 
 ## Scripts
 
