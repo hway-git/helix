@@ -211,7 +211,7 @@ Get at https://www.aicoin.com/opendata. See [Paid Feature Guide](#paid-feature-g
 | `orderStatus` | 订单状态 | `user` + `extra_params.oid` |
 | `candleSnapshot` | K 线 | `extra_params.req={coin,interval,startTime,endTime}` |
 | `perpDexs` | 永续 DEX 列表 | — |
-| `allMids` | 所有 mid price | — |
+| `allMids` | 所有 mid price (~517 个市场)。**数量比 `hl-market.tickers` 少** (tickers 全表 ~686 个), allMids 不含部分 spot index `@N` 和无活跃报价的 deployer 市场。要全市场用 tickers, 这个仅看活跃 mid。 | — |
 | `l2Book` | L2 订单簿 | `extra_params.coin` |
 | `portfolio` | 账户曲线 | `user` |
 | `webData2` | 综合用户数据 (资产、订单、成交聚合) | `user` |

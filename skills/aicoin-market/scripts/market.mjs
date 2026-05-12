@@ -65,11 +65,22 @@ cli({
     if (open_time) p.open_time = open_time; if (since) p.since = since;
     return apiGet('/api/v2/indicatorKline/dataRecords', p);
   },
-  indicator_pairs: ({ coinType, indicator_key } = {}) => {
-    const p = {};
-    if (coinType) p.coinType = coinType;
-    if (indicator_key) p.indicator_key = indicator_key;
-    return apiGet('/api/v2/indicatorKline/getTradingPair', p);
+  indicator_pairs: async ({ coinType, indicator_key } = {}) => {
+    if (!coinType || !indicator_key) {
+      return {
+        success: false, errorCode: 400,
+        error: 'indicator_pairs 必填 indicator_key + coinType (例: {"indicator_key":"fundflow","coinType":"USDT"})',
+        参数提示: '缺任意一个上游会返 400, 本地拦截以省签名。',
+      };
+    }
+    const p = { coinType, indicator_key };
+    const json = await apiGet('/api/v2/indicatorKline/getTradingPair', p);
+    // 实测: indicator_key 取值范围未公开, 传 coinType 也可能某些 indicator_key 返空
+    const list = json?.data?.list ?? json?.data;
+    if (Array.isArray(list) && list.length === 0) {
+      json._note = `indicator_pairs '${indicator_key}+${coinType}' 返空 list。可能 indicator_key 名字不对 (后端 spec 未公开完整列表) 或该 coinType 下确实没指标 K 线交易对。换 indicator_key (fundflow/...) 或换 coinType (USDT/USDC/...) 再试。`;
+    }
+    return json;
   },
   // index_data
   index_price: ({ key, currency }) => {

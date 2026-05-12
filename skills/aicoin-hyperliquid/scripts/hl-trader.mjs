@@ -55,10 +55,14 @@ cli({
     const p = { period: period || '30' }; if (limit) p.limit = limit;
     return apiGet(`/api/upgrade/v2/hl/traders/${address}/performance-by-coin`, p);
   },
-  completed_trades: ({ address, coin, limit } = {}) => {
-    const err = requireAddress(address); if (err) return Promise.resolve(err);
+  completed_trades: async ({ address, coin, limit } = {}) => {
+    const err = requireAddress(address); if (err) return err;
     const p = {}; if (coin) p.coin = coin; if (limit) p.limit = limit;
-    return apiGet(`/api/upgrade/v2/hl/traders/${address}/completed-trades`, p);
+    const json = await apiGet(`/api/upgrade/v2/hl/traders/${address}/completed-trades`, p);
+    if (json && Array.isArray(json.data) && json.data.length === 0) {
+      json._note = `completed_trades 该地址${coin ? ` ${coin}` : ''} 近期无已平仓交易。换 coin 或不传 coin 看全部历史; 想看活跃币种用 performance (per-coin 业绩)。`;
+    }
+    return json;
   },
   accounts: async ({ addresses }) => {
     let addrs = addresses;
@@ -117,10 +121,14 @@ cli({
     const p = {}; if (coin) p.coin = coin; if (whaleThreshold || whale_threshold) p.whaleThreshold = whaleThreshold || whale_threshold;
     return apiGet('/api/upgrade/v2/hl/orders/active-stats', p);
   },
-  twap_states: ({ address, coin, limit } = {}) => {
-    const err = requireAddress(address); if (err) return Promise.resolve(err);
+  twap_states: async ({ address, coin, limit } = {}) => {
+    const err = requireAddress(address); if (err) return err;
     const p = {}; if (coin) p.coin = coin; if (limit) p.limit = limit;
-    return apiGet(`/api/upgrade/v2/hl/twap-states/${address}/latest`, p);
+    const json = await apiGet(`/api/upgrade/v2/hl/twap-states/${address}/latest`, p);
+    if (json && Array.isArray(json.data) && json.data.length === 0) {
+      json._note = `twap_states 该地址当前无 TWAP 委托 (空属正常 — TWAP 是 HL 的时间加权拆单, 大多数地址不用)。常态返空, 不是接口故障。`;
+    }
+    return json;
   },
   // hl_position
   current_pos_history: async ({ address, coin } = {}) => {
@@ -270,14 +278,18 @@ cli({
   },
   // 注意: 上游 body 字段是大写 Coin (不是 coin)。 agent 容易传小写, 静默拿到全币种杂烩。
   // 这里兼容两种大小写, 不让 silent wrong 发生。
-  completed_trades_by_time: ({ address, pageNum, pageSize, Coin, coin, endTimeFrom, endTimeTo } = {}) => {
-    const err = requireAddress(address); if (err) return Promise.resolve(err);
+  completed_trades_by_time: async ({ address, pageNum, pageSize, Coin, coin, endTimeFrom, endTimeTo } = {}) => {
+    const err = requireAddress(address); if (err) return err;
     const body = {};
     if (pageNum) body.pageNum = pageNum; if (pageSize) body.pageSize = pageSize;
     const coinValue = Coin || coin;
     if (coinValue) body.Coin = coinValue;
     if (endTimeFrom) body.endTimeFrom = endTimeFrom; if (endTimeTo) body.endTimeTo = endTimeTo;
-    return apiPost(`/api/upgrade/v2/hl/traders/${address}/completed-trades/by-time`, body);
+    const json = await apiPost(`/api/upgrade/v2/hl/traders/${address}/completed-trades/by-time`, body);
+    if (json && Array.isArray(json.data) && json.data.length === 0) {
+      json._note = `completed_trades_by_time 时间窗 [${endTimeFrom || '?'}, ${endTimeTo || '?'}] 内该地址${coinValue ? ` ${coinValue}` : ''} 无已平仓交易。 扩大时间窗 (ms epoch), 或用 completed_trades 不限时间。`;
+    }
+    return json;
   },
   batch_clearinghouse_state: ({ addresses, dex }) => {
     let addrs = addresses;

@@ -53,6 +53,28 @@ function sign() {
   return { AccessKeyId: KEY, SignatureNonce: nonce, Timestamp: ts, Signature: sig };
 }
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AiCoin 后端有两套响应封装, agent / 调用方要双重处理:
+//
+// 1. `/api/v2/*` 端点 (老一代):
+//    HTTP 200 + body `{success: true|false, errorCode, error, data}`
+//    付费墙 / 参数错都走 errorCode 304 软错误, 不 throw HTTP 4xx
+//
+// 2. `/api/upgrade/v2/*` 端点 (新一代):
+//    HTTP 403 / 4xx 直接 fail, apiGet throw `Error("API 403: ...")`
+//    成功返 `{success, errorCode, data}` 也是新格式
+//
+// apiGet 把两种模式都吸收:
+//   - 1xx-2xx 直接 return JSON
+//   - 4xx (5xx) throw Error, 带上付费 hint / 上游故障 hint
+//   - JSON 内 errorCode 304/403 时识别"付费 vs 参数错"附加提示
+//
+// 这就是 SKILL.md "跨接口字段约定" 里说的"两套响应封装,要双判"。
+// 调用方代码若想优雅处理, 应 try/catch 包 apiGet 的所有调用, catch 里
+// 同时取 e.message (来自 4xx throw) 和 json.error / json.付费功能提示
+// (来自 200 + errorCode 软错误)。
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 // 标记后端 / 网关上游故障，给 agent 明确文本提示去引导用户联系客服，
 // 避免 agent 把临时上游故障描述为"你的参数错"。
 function upstreamFaultHint(status, path) {

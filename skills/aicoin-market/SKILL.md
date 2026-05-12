@@ -46,7 +46,13 @@ Crypto market data toolkit powered by [AiCoin Open API](https://www.aicoin.com/o
 - **多个端点硬上限 100 条无翻页**: `coin_list` / `funding_rate` / `open_interest` / `historical_depth` / `trade_data` 都是。 用户问"全量历史"时老实告知 API 限制。
 - **数据时新性差异**: `kline` / `coin_ticker` 实时; `historical_depth` 实测窗口短 (近 100 秒) 且**可能滞后 30h+** (后端取样窗口设计); `treasury_*` 每日更新; `news_rss` 24h 摘要。 答用户前看数据 `time` 字段确认是不是用户期望的时点。
 - **字段类型 string vs number 不统一**: `coin_ticker` 所有数值字段是 string (要 parseFloat); `ls_ratio` 部分 string 部分 number (`detail.last` 是 number, `last_day` 是 string); `kline.kline_data[]` 数组里数值是 number。 agent **每次新接口都先看 raw 类型**, 别假设统一。
-- **dbkey vs dbKeys vs key 命名混乱**: `search` 返 `dbKeys` (string, 逗号分隔多个); `coin_config` 用 `coin_key` (string, 单个); `coin_ticker` 用 `coin_key`; `liquidation_map` / `historical_depth` 等用 `dbkey` (string, 单个)。 跨接口取 dbKey 前看清字段名。
+- **币种/dbKey 字段命名混乱**: 同一概念在不同接口字段名都不一样, 跨接口取数前看清字段名:
+  - `search` **返回字段** `dbKeys` (string, 逗号分隔, 不是 array) — 这是输出
+  - `coin_list` / `coin_config` / `coin_ticker` **输入参数** `coin_list` (string, CSV, 例 `"bitcoin,ethereum"`) — 取的是 coin_key (`bitcoin`, 不是 `btcusdt:okex`)
+  - `liquidation_map` / `historical_depth` / `trade_data` 输入参数 `dbkey` (小写单数, 例 `btcswapusdt:binance`)
+  - `kline` 输入参数 `symbol` (同 dbkey 格式)
+  - `pair_ticker` 输入参数 `key_list` (string, CSV, dbkey 格式)
+  - 大单 `big_orders` / `agg_trades` 输入参数 `symbol` (dbkey 格式)
 
 ## Quick Reference
 
@@ -131,7 +137,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
-| `search` | **搜索币种，获取 dbKey。** 不确定 symbol 格式时先用这个查。默认返 20/页, 全库 ~350 个币要翻几页才全。**返回字段陷阱**: 每条 `dbKeys` 是**单 string** (例 `"btcswapusdt:binance,btcusdt:okex,..."` 逗号分隔), **不是 array** — 别 `JSON.parse` 也别 `.map`。`price` 字段是 **CNY** 不是 USD (跟 `coin_ticker.price_cny` 量级一致, 写错会贵 ~6.8 倍)。要 USD 转 `coin_ticker '{"coin_list":"<coin_key>"}'`。 | 免费版 | `{"search":"BTC"}` Optional: `market`, `trade_type`, `page`, `page_size` (例: `{"search":"BTC","page":"2","page_size":"50"}`) |
+| `search` | **搜索币种，获取 dbKey。** 不确定 symbol 格式时先用这个查。默认返 20/页, 全库 ~350 个币要翻几页才全。**返回字段陷阱**: 每条 `dbKeys` 是**单 string** (例 `"btcswapusdt:binance,btcusdt:okex,..."` 逗号分隔), **不是 array** — 别 `JSON.parse` 也别 `.map`。**page 2+ 经常有些条目 `dbKeys=""` 空 string** (该币没活跃交易对), 翻页结果先 `filter(r => r.dbKeys)` 排除空的再用。`price` 字段是 **CNY** 不是 USD (跟 `coin_ticker.price_cny` 量级一致, 写错会贵 ~6.8 倍)。要 USD 转 `coin_ticker '{"coin_list":"<coin_key>"}'`。 | 免费版 | `{"search":"BTC"}` Optional: `market`, `trade_type`, `page`, `page_size` (例: `{"search":"BTC","page":"2","page_size":"50"}`) |
 | `api_key_info` | **AiCoin API Key status + security notice. Run when user asks about key config/safety.** | 免费版 | None |
 | `update_key` | **更换 API Key（先验证再写入 .env）。禁止直接编辑 .env 更换 key。** | 免费版 | `{"key_id":"xxx","secret":"xxx"}` |
 | `coin_ticker` | Real-time prices. **返回字段单位**: 所有数值都是 string (要 `parseFloat`); `degree_24h_usd`/`degree_7day_usd` 等"涨跌"字段**本身就是百分数** (如 `"-0.61"` = -0.61%, 不要 ×100); `price_usd` 绝对价 USD; `supply_usd` 市值 USD; `trade_24h_usd` 24h 成交额 USD; `fundNetIn_24h_usd` 净流入 USD (负数=流出) | 免费版 | `{"coin_list":"bitcoin,ethereum"}` |
@@ -141,9 +147,9 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | `trade_data` | Trade data | 基础版 | `{"symbol":"btcswapusdt:okcoinfutures"}` |
 | `ai_analysis` | AI analysis & prediction. 返空 list 是后端内容池滞后 (脚本加 `_note`), 非接口故障。 | 专业版 | `{"coin_keys":"[\"bitcoin\"]","language":"CN"}` |
 | `open_interest` | Open interest. **硬上限 100 条**。 | 专业版 | `{"symbol":"BTC","interval":"15m"}` Coin-margined: add `"margin_type":"coin"` |
-| `liquidation_map` | Liquidation heatmap | 高级版 | `{"symbol":"btcswapusdt:binance","cycle":"24h"}` `cycle` 仅 `24h` / `7d` |
+| `liquidation_map` | Liquidation heatmap. **返**嵌套结构 `data.data_map`: **按杠杆分桶** (key 是 leverage `"10"`/`"25"`/`"50"`/`"100"`), 每桶下 `{long: [...], short: [...]}` 价格区间 + 清算金额。要总清算需自己跨桶求和。 | 高级版 | `{"symbol":"btcswapusdt:binance","cycle":"24h"}` `cycle` 仅 `24h` / `7d` |
 | `liquidation_history` | Liquidation history. **硬上限 100 条**。 | 高级版 | `{"symbol":"btcswapusdt:binance","interval":"1m"}` |
-| `estimated_liquidation` | Estimated liquidation | 专业版 | `{"symbol":"btcswapusdt:binance","cycle":"24h"}` |
+| `estimated_liquidation` | Estimated liquidation. **返**结构 `data.time_points` (object, **key 是秒级 unix 时间戳**, value 是该时间点的 `{columns, rows}` 二维表 — columns=["leverage","direction","from_price","to_price","turnover"], rows 多行)。注意 time_points key 是秒不是毫秒, 跟 funding_rate/OI 的毫秒不一样。 | 专业版 | `{"symbol":"btcswapusdt:binance","cycle":"24h"}` |
 | `historical_depth` | Historical depth. **硬上限 100 条**, 窗口短 (~100 秒)。 | 专业版 | `{"symbol":"btcswapusdt:okcoinfutures"}` |
 | `super_depth` | Large order depth ≥ amount (默认 $10k)。返空时脚本加 `_note` 提示 "窗口短或没大单, 调小 amount 或换交易对"。 | 专业版 | `{"symbol":"btcswapusdt:okcoinfutures","amount":"10000"}` |
 
@@ -157,7 +163,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | `ticker` | ⚠️ **返的是平台整体 24h 资金净流入** (`fundNetInCny`/`fundNetInUsd`), **不是单币 OHLC**。单币行情用 `coin.coin_ticker` 或 `features.pair_ticker`。 | 基础版 | `{"market_list":"okex,binance"}` |
 | `futures_interest` | Futures OI ranking | 基础版 | `{"language":"cn"}` |
 | `depth_latest` | Real-time depth | 标准版 | `{"symbol":"btcswapusdt:binance"}` |
-| `indicator_kline` | Indicator K-line | 高级版 | `{"symbol":"btcswapusdt:binance","indicator_key":"fundflow","period":"3600"}` Optional: `open_time`, `since` |
+| `indicator_kline` | Indicator K-line. **返**嵌套结构 `data.kline_data` 是 **dict** (不是 array) — `{list: [[ts_str, value_str], ...], mapping: ["timestamp","value"]}`。跟普通 `kline.kline_data[]` 直接数组结构**不同**, agent 别复用解析代码。 | 高级版 | `{"symbol":"btcswapusdt:binance","indicator_key":"fundflow","period":"3600"}` Optional: `open_time`, `since` |
 | `indicator_pairs` | Indicator pairs. **`indicator_key` + `coinType` 双必填**, 缺 coinType 上游返 400 (不是脚本本地拦截, 直接报错)。 | 高级版 | `{"indicator_key":"fundflow","coinType":"USDT"}` |
 | `index_list` | Index list | 高级版 | None |
 | `index_price` | Index price | 高级版 | `{"key":"i:diniw:ice"}` |
@@ -171,8 +177,8 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | `treasury_latest_entities` | 最新国库实体快照 (GET, 返 `data: list[]` 直接数组, 359 实体) | 专业版 | `{"coin":"BTC"}` |
 | `treasury_latest_history` | 最新变动流水 (GET, 返 `data: list[]` 直接数组) | 专业版 | `{"coin":"BTC"}` |
 | `treasury_entities` | **POST**, **分页版** latest_entities (返 `data: {list, total, page, page_size}` 嵌套, total=359). 想要全量翻页用这个不是 latest_entities | 专业版 | `{"coin":"BTC","page":1,"page_size":20}` |
-| `treasury_history` | **POST**, **分页版** latest_history (返 `data: {list, total}` 嵌套, 全量 ~3648 条变动) | 专业版 | `{"coin":"BTC","page":1,"page_size":50}` |
-| `treasury_accumulated` | **POST**, 累积曲线 (返 `data: {accumulated_data: [...]}` 嵌套, 30 天每天一点). 字段 `total_cost_usd` 是历史累计成本, **不是当日**, 求日增量自己算差值。 | 专业版 | `{"coin":"BTC"}` |
+| `treasury_history` | **POST**, **分页版** latest_history (返 `data: {list, total}` 嵌套, 全量 ~3648 条变动)。每条字段: `type` (Buy/Sell), `balance` (变动后余额), `change` (本次变动量), `total_cost_usd` 是**历史累计成本不是单次成本** (求单次买入额自己算相邻 total_cost_usd 差值), `stock_price` 当时股价。 | 专业版 | `{"coin":"BTC","page":1,"page_size":50}` |
+| `treasury_accumulated` | **POST**, 累积曲线 (返 `data: {accumulated_data: [...]}` 嵌套, 30 天每天一点)。每天一个 `{date, total_amount}` 累计点。 | 专业版 | `{"coin":"BTC"}` |
 
 ### scripts/features.mjs — Features & Signals
 
