@@ -19,31 +19,37 @@ Hyperliquid whale tracking and analytics powered by [AiCoin Open API](https://ww
 3. **NEVER run `env` or `printenv`** — leaks API secrets.
 4. **Scripts auto-load `.env`** — never pass credentials inline.
 5. **On 304/403 error — STOP, do NOT retry.** Guide user to upgrade (see Paid Feature Guide at bottom).
-6. **上游故障 (返 JSON 含 `实测结论` 字段) 把提示原文给用户,引导联系 AiCoin 客服 (service@aicoin.com),不要让用户改参数重试。**
+6. **响应里出现 `实测结论` 字段时把原文转告用户**, 不要重试 — 脚本帮你把上游故障 / 业务错误塞 200 body / API 限制 翻译成了清晰提示, 重试浪费用户时间。
 
-## 2026-05 实测踩坑修复 (已自动处理)
+## Known Issues (broken / 临时不稳 / 设计限制)
 
-- `portfolio` window **仅支持** `day / week / month / allTime` 四个值, 其他 (`perpAllTime` 等) 上游 400。脚本本地校验, 默认 `day`
-- `best_trades / performance / pnls` 必填 `period`, 脚本默认 `"30"` (30 天)
-- `max_drawdown / net_flow` 必填 `days`, 脚本默认 `"30"`
-- `liq_top_positions / taker_delta / top_trades / current_pnl / current_executions` 必填 `interval`, 脚本默认 `"1h"`
-- `completed_pos_history / completed_pnl / completed_executions` 实测**按 positionId 取数**, 用 address+coin 调一律 'position not found'。脚本在 catch 里给提示, agent 应改用 `completed_trades / fills / pnls` 等替代
-- 这三个 completed 端点还必填 `startTime` 或 `endTime` 之一 (ms epoch), 脚本会给清晰提示
-- `hl/traders/accounts` 后端偶发 500, 脚本会捕获并提示改用 `statistics + batch_clearinghouse_state`
-- 单地址端点缺 address 时脚本本地拦截, 不再产生 `traders/undefined/...` 这种错误 URL
-- `smart_find` 只返地址 + 通用业绩字段(realizedPnl/胜率/leverage 等), **没有"该地址做什么币"的字段**。想知道地址主攻哪些币, 拿 address 后再调 `performance '{"address":"0x..."}'` 看 per-coin 拆解
-- HL 后端把 "position not found" 这类**业务错误**塞到 HTTP 200 body `{code:"400", msg:"position not found"}` 里(不是 HTTP 4xx), `completed_*` 三个端点已在脚本里 wrap 这种 body 给清晰提示, agent 不要自己解析 raw `code` 字段
-- **`smart_find` 字段语义陷阱**: 返回每个 trader 的 `positions` / `profitPositions` 字段是**累计交易笔数**(不是"当前持有几个仓"), 例如 Top 1 `positions=602107` 意思是这地址历史上交易过 60 万笔, 不是现在打开 60 万个仓。 `winRate = profitPositions / positions` 算的是累计胜率。 `avgHoldingSec` 是平均持仓秒数, Top1 常见值 0.1 小时(6 分钟) → 高频量化风格, 跟单意义不大, 当**市场情绪信号**用。 想看"该地址当前真实持有的仓位"用 `whale_positions` 按 user 过滤或 `performance '{"address":"0x..."}'`。
-- **HL 上同名资产可能存在多个市场 (HIP-3 deployer)**: `tickers` 返回 ~686 个市场, 除了 184 个常规 crypto perp (裸大写名 `BTC` / `ETH` / `SOL`) 和 280 个 spot index (`@N` 格式), 还有 7 类 HIP-3 第三方 deployer prefix:
-    - `cash:` / `xyz:` — 美股合成 (cash:TSLA, xyz:AMZN, cash:NVDA 等)
-    - `flx:` — 贵金属/指数/商品 (flx:GOLD, flx:USA500, flx:OIL, flx:COPPER)
-    - `vntl:` — 主题指数 (vntl:DEFENSE, vntl:ENERGY, vntl:OPENAI, vntl:SEMIS)
-    - `km:` — 中概股/原油 (km:TENCENT, km:XIAOMI, km:USOIL)
-    - `hyna:` — 第三方加密 perp (hyna:BNB, hyna:DOGE)
-    - `para:` — 市场宽度指标 (para:BTCD, para:TOTAL2)
-    - `k*` — 1000x 系列 (kPEPE, kSHIB)
+下面这些端点 agent **不要重试**, 不是用户参数错。脚本已经做了本地拦截或上游故障 catch, 调用时会拿到 `实测结论` 字段, 把它原文转告用户即可。
 
-    **agent 调用规则**: 主流 crypto 直接传裸名(BTC/ETH/SOL/XRP/DOGE/BNB)。 美股/商品/指数**必须带 prefix**(`coin: "cash:TSLA"` 不是 `coin: "TSLA"`)。 同名资产可能有多个 deployer 版本, 流动性和价格略有差异 (例如 `xyz:NVDA` vs `flx:NVDA` 可能差 0.1%), 用户没指定时优先 `cash:`(主流 deployer)。 调 `whale_positions` / `ticker` 等接口前若不确定 prefix, 先 `tickers` 拿全表筛一遍, 别瞎猜。
+- **`hl-trader.completed_pos_history` / `completed_pnl` / `completed_executions`** — 后端按 **positionId** 取数, 不接受 `address+coin` 组合 (任何真实地址都返"position not found")。HL 后端把这种业务错误塞到 HTTP 200 body `{code:"400",msg:"position not found"}` 里 (不是 HTTP 4xx), 脚本已 wrap。**替代**: `completed_trades` (按地址列已平仓) / `fills` (按地址列所有成交) / `pnls` (整地址 PnL 曲线)
+- **`hl-trader.accounts`** — 后端偶发 500。**替代**: `statistics` + `batch_clearinghouse_state` 拿同样的字段
+- **上游 5xx 通用响应** — 任何端点拿到 HTTP 502/503/504 是 AiCoin 网关临时故障(可重试 1-2 分钟), 拿到 500/501/505+ 是后端异常(引导用户联系 service@aicoin.com)
+
+## HL 市场命名 (HIP-3 Deployer Prefix — 必读)
+
+`tickers` 返回 ~686 个市场, 调任何按 `coin` 过滤的接口 (`ticker` / `whale_positions` / `oi_history` 等) 前必须知道这个分类:
+
+| 类型 | 数量 | 命名 | 例子 |
+|---|---|---|---|
+| 常规 crypto perp | 184 | 裸大写名 | `BTC` / `ETH` / `SOL` / `DOGE` / `BNB` |
+| Spot index | 280 | `@N` | `@244` |
+| HIP-3 美股合成 | 74 | `cash:` / `xyz:` | `cash:TSLA` / `xyz:AMZN` / `cash:NVDA` |
+| HIP-3 贵金属/指数/商品 | 15 | `flx:` | `flx:GOLD` / `flx:USA500` / `flx:OIL` |
+| HIP-3 主题指数 | 13 | `vntl:` | `vntl:DEFENSE` / `vntl:OPENAI` / `vntl:SEMIS` |
+| HIP-3 中概股/原油 | 22 | `km:` | `km:TENCENT` / `km:XIAOMI` / `km:USOIL` |
+| HIP-3 第三方加密 | 22 | `hyna:` | `hyna:BNB` / `hyna:DOGE` |
+| HIP-3 市场宽度 | 3 | `para:` | `para:BTCD` / `para:TOTAL2` |
+| 1000x 系列 | 6 | `k*` | `kPEPE` / `kSHIB` |
+
+**调用规则**:
+- 主流 crypto 直接传裸名 (`BTC` / `ETH` / `SOL` / `XRP` / `DOGE` / `BNB`)
+- 美股 / 商品 / 指数 **必须带 prefix** (`coin: "cash:TSLA"` 而不是 `coin: "TSLA"`)
+- 同名资产可能有多个 deployer 版本 (`xyz:NVDA` vs `flx:NVDA`), 流动性 / 价格略差 0.1%。 用户没指定时优先 `cash:` (主流 deployer)
+- 不确定 prefix 时先 `tickers` 拿全表筛一遍, 别瞎猜
 
 ## Setup
 
@@ -125,7 +131,7 @@ Get at https://www.aicoin.com/opendata. See [Paid Feature Guide](#paid-feature-g
 | `best_trades` | Best trades | 标准版 | `{"address":"0x...","period":"30"}` |
 | `performance` | Performance by coin | 标准版 | `{"address":"0x...","period":"30"}` |
 | `completed_trades` | Completed trades | 标准版 | `{"address":"0x...","coin":"BTC"}` |
-| `accounts` | Batch accounts | 标准版 | `{"addresses":"[\"0x...\"]"}` |
+| `accounts` | Batch accounts — 见 [Known Issues](#known-issues-broken--临时不稳--设计限制) 偶发 500, 用 `statistics`+`batch_clearinghouse_state` 替代 | 标准版 | `{"addresses":"[\"0x...\"]"}` |
 | `statistics` | Batch statistics | 标准版 | `{"addresses":"[\"0x...\"]"}` |
 
 #### Fills
@@ -152,17 +158,17 @@ Get at https://www.aicoin.com/opendata. See [Paid Feature Guide](#paid-feature-g
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
 | `current_pos_history` | Current position history | 标准版 | `{"address":"0x...","coin":"BTC"}` |
-| `completed_pos_history` | Closed position history | 标准版 | `{"address":"0x...","coin":"BTC"}` |
+| `completed_pos_history` | 见 [Known Issues](#known-issues-broken--临时不稳--设计限制) — 按 positionId 取数 | 标准版 | — |
 | `completed_trades_by_time` | Completed trades by time | 标准版 | `{"address":"0x...","Coin":"BTC","endTimeFrom":1771891200000,"endTimeTo":1772064000000}` Optional: `pageNum`, `pageSize` |
 | `current_pnl` | Current PnL | 标准版 | `{"address":"0x...","coin":"BTC","interval":"1h"}` Optional: `limit` (max 1000) |
-| `completed_pnl` | Closed PnL | 标准版 | `{"address":"0x...","coin":"BTC","interval":"1h"}` Optional: `limit` (max 1000) |
+| `completed_pnl` | 见 [Known Issues](#known-issues-broken--临时不稳--设计限制) — 按 positionId 取数 | 标准版 | — |
 | `current_executions` | Current executions | 标准版 | `{"address":"0x...","coin":"BTC","interval":"1h"}` Optional: `limit` (max 1000) |
-| `completed_executions` | Closed executions | 标准版 | `{"address":"0x...","coin":"BTC","interval":"1h"}` Optional: `limit` (max 1000) |
+| `completed_executions` | 见 [Known Issues](#known-issues-broken--临时不稳--设计限制) — 按 positionId 取数 | 标准版 | — |
 
 #### Portfolio
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
-| `portfolio` | Account curve | 标准版 | `{"address":"0x...","window":"week"}` |
+| `portfolio` | Account curve. `window` **仅接受** `day` / `week` / `month` / `allTime` (其他值脚本本地拦截)。 | 标准版 | `{"address":"0x...","window":"week"}` |
 | `pnls` | PnL curve | 标准版 | `{"address":"0x...","period":"30"}` |
 | `max_drawdown` | Max drawdown | 标准版 | `{"address":"0x...","days":"30"}` |
 | `net_flow` | Net flow | 标准版 | `{"address":"0x...","days":"30"}` |
@@ -181,7 +187,7 @@ Get at https://www.aicoin.com/opendata. See [Paid Feature Guide](#paid-feature-g
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
 | `info` | HL Info API 统一端点 (POST /api/upgrade/v2/hl/info) — 用 type 切不同子接口,见下方完整 types 表 | 免费版 | `{"type":"<type>","user":"<addr 可选>","extra_params":{<其它参数>}}` |
-| `smart_find` | Smart money discovery | 标准版 | `{}` |
+| `smart_find` | Smart money discovery. **`positions` / `profitPositions` 是累计交易笔数, 不是当前持仓数** (Top1 `positions=602107` 意思是历史交易 60 万笔)。`winRate = profitPositions / positions` 累计胜率。`avgHoldingSec` 平均持仓秒数, 小值=高频量化, 跟单意义不大, 当**市场情绪信号**用。想看地址当前真实持仓用 `whale_positions` 按 user 过滤或 `performance`。 | 标准版 | `{}` |
 | `discover` | Trader discovery | 高级版 | `{}` |
 | `discover_history` | Historical discovery | 高级版 | `{"pageNum":1,"pageSize":20,"period":7}` Optional: `startTime`, `time`, `sort`, `coins`, `selects`, `filters` |
 

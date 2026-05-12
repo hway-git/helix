@@ -21,25 +21,16 @@ Crypto market data toolkit powered by [AiCoin Open API](https://www.aicoin.com/o
 5. **Reply in the user's language.** Chinese input = all-Chinese response (titles, headings, analysis).
 6. **On 304/403 error — STOP, do NOT retry.** This is a paid feature. Follow the [Paid Feature Guide](#paid-feature-guide) to help the user upgrade.
 7. **更换 API Key 只能用 `update_key` 命令。** 禁止直接编辑 .env、禁止用 gateway/edit 工具改 key。`update_key` 会先验证 key 有效才写入。
-8. **上游故障 (HTTP 5xx / `_note` 含"后端"或"实测结论") 不是用户参数错。** 当返回 JSON 含 `实测结论` 字段时,**必须**把该提示原文转告用户,引导联系 AiCoin 客服 (service@aicoin.com),**不要**让用户改参数重试。
+8. **响应里出现 `实测结论` / `_note` 字段时把原文转告用户**,不要重试同一参数 — 这些是脚本帮你把上游故障 / 数据空 / API 设计限制翻译成了清晰提示, 重试会浪费用户时间。
 
-## 2026-05 实测踩坑修复 (已自动处理,这里只是知会)
+## Known Issues (broken / 临时不稳的端点)
 
-- `big_orders` / `agg_trades` 实测**仅支持 8 家**: binance(永续+现货) / okcoinfutures(OKX 永续) / bybit / bitget(用 btcumcblusdt) / gate / coinbase / upbit。脚本自动把 `:okex` 转 `:okcoinfutures`, `btcswapusdt:bitget` 转 `btcumcblusdt:bitget`. huobi/kraken/mexc/kucoin 等会被脚本本地拒绝并返清晰提示
-- `funding_rate` AiCoin 只覆盖 BTC,其他币改用 `aicoin-trading exchange.mjs funding_rate`
-- `strategy_signal` 后端 broken: 公开的 signal_key 格式 (`depth_win_one` 等) 实测都返 400。脚本会直接返 `实测结论: AiCoin 接口故障` 提示, **不要重试**
-- `stock_company` / `airdrop detail` / `hl/traders/accounts` 后端偶发 500: 脚本会捕获并返清晰提示告诉用户联系客服, **不要让用户改参数**
-- `ai_analysis` 返空 list 是后端内容池空, 不是接口故障. 脚本会加 `_note` 提示
-- `funding_rate weighted=true` / `super_depth` 返空 list 通常是窗口/数据问题, 脚本加 `_note` 区分
-- `liq` 是 `liquidation` 的 alias; `ai_coins` 是 `ai_analysis` 的 alias; `exchange_listing_flash` 是 `exchange_listing` 的 alias — 都可用
-- 多个端点的硬上限 100 条 (coin_list / funding_rate / open_interest / historical_depth / trade_data), 没有 pagination, 别问"为啥只有 100 条"
-- `search` 支持翻页参数: `{"search":"BTC","page":"2","page_size":"50"}` (默认 page=1 / page_size=20, 全库 ~350 个币要翻几页才全)
-- `hot_coins` 的 `key` 实测只 `defi` 通; `meme` / `new` 都返空,可能需要后端更新字典。 用户问 meme 热点币改用 `coin.mjs search '{"search":"meme","trade_type":"spot"}'`
-- `market.mjs ticker '{"market_list":"binance"}'` 返的是**平台整体 24h 资金净流入**, 不是单币 OHLC。 单币行情用 `coin.mjs coin_ticker` 或 `features.mjs pair_ticker`
-- **`coin_ticker` 返回字段单位陷阱**: 所有数值都是 **string 类型**, 别忘了 `parseFloat`。`degree_24h_usd` / `degree_7day_usd` / `degree_24h_cny` 等"涨跌"字段 **本身就是百分比数值**, 例如 `"-0.61"` 表示 **-0.61%**, **不要再 ×100**。`price_usd` / `price_cny` 是绝对价格,`supply_usd` 是市值(USD),`trade_24h_usd` 是 24h 成交额(USD),`fundNetIn_24h_usd` 是 24h 净流入(USD,负数=流出)。
-- **`ls_ratio` 是全局加权汇总, 不分交易所/币种**: 返回 `{detail: {last, last_day, last_week}}` 三个数, 代表全市场多空比快照 (`last`=现在 / `last_day`=24h 前 / `last_week`=一周前)。 `>1` 多头占优, `<1` 空头占优。 **Open API 暂未暴露分交易所/分币种的多空比**, 用户要看 Binance/OKX 单所多空比时, 老实告知"AiCoin Open API 当前只返全局多空比, 分交易所版本暂未开放, 可去 aicoin.com 网页端查看"。 不要瞎猜参数 (传 `symbol` / `marketKey` 都没用, 接口忽略)。
-- **`newsflash.mjs list` 字段名陷阱**: 返回结构是 `{data: {isLive, list: [...]}}`, 每条快讯有 40+ 字段(直播 / 投票 / Pro 等冗余字段), 但**最常用的就 4 个**: `timestamp` (秒级 unix, 不是 createtime/publish_time), `title` (标题), `content` (正文), `is_important` / `is_pro` (重要 / Pro 标记)。 想要双语版用 `transTitle` / `transContent`。 别瞎猜 `createtime` / `content_text` / `description` —— 不存在。
-- **`big_orders` / `agg_trades` 的 `high_amount` 单位是合约张数, 不是币数量**: 不同交易所每张面值不同, 比如 **OKX 永续每张 = 0.01 BTC**(`high_amount=3419` 张 = 34 BTC), **Binance 永续每张 = 1 BTC**(`high_amount=41.6` 张 = 41.6 BTC)。 想拿真实币数量用 `depth_vol` 字段(已换算成币), 或自己算 `high_turnover / depth_price`。 想拿美元成交额直接用 `high_turnover`。 **agent 输出给用户时务必用美元金额, 别报"X 张" / "X BTC"** —— 张数没意义, BTC 数算错了离谱。
+下面这些端点 agent **不要重试**, 不是用户参数错, 是 AiCoin 后端的问题。脚本已经做了本地拦截或上游故障 catch, 调用时会拿到 `实测结论` 字段, 把它原文转告用户即可。
+
+- **`features.strategy_signal`** — 后端长期 broken, 公开 signal_key 格式 (`depth_win_one` 等) 实测全 400。脚本本地无条件拦截, 不会真调上游。**替代**: `change_signal` (异动信号) / `signal_alert` (用户配置预警)
+- **`market.stock_company`** — 后端偶发 500 (实测 COIN/MSTR 都触发)。**替代**: `stock_quotes` 拿价格/市值/公司名汇总
+- **`airdrop.detail`** — 后端偶发 500 (三种 type+token 组合都试过)。**替代**: `airdrop.list / banner / calendar` 拿简要信息
+- **上游 5xx 通用响应** — 任何端点拿到 HTTP 502/503/504 是 AiCoin 网关临时故障(可重试 1-2 分钟), 拿到 500/501/505+ 是后端异常(直接引导用户联系 service@aicoin.com), 不要让用户改参数
 
 ## Quick Reference
 
@@ -124,30 +115,30 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
-| `search` | **搜索币种，获取 dbKey。** 不确定 symbol 格式时先用这个查。 | 免费版 | `{"search":"BTC"}` Optional: `market`, `trade_type`, `page`, `page_size` |
+| `search` | **搜索币种，获取 dbKey。** 不确定 symbol 格式时先用这个查。默认返 20/页, 全库 ~350 个币要翻几页才全。 | 免费版 | `{"search":"BTC"}` Optional: `market`, `trade_type`, `page`, `page_size` (例: `{"search":"BTC","page":"2","page_size":"50"}`) |
 | `api_key_info` | **AiCoin API Key status + security notice. Run when user asks about key config/safety.** | 免费版 | None |
 | `update_key` | **更换 API Key（先验证再写入 .env）。禁止直接编辑 .env 更换 key。** | 免费版 | `{"key_id":"xxx","secret":"xxx"}` |
-| `coin_ticker` | Real-time prices | 免费版 | `{"coin_list":"bitcoin,ethereum"}` |
-| `coin_list` | List all coins | 基础版 | None |
+| `coin_ticker` | Real-time prices. **返回字段单位**: 所有数值都是 string (要 `parseFloat`); `degree_24h_usd`/`degree_7day_usd` 等"涨跌"字段**本身就是百分数** (如 `"-0.61"` = -0.61%, 不要 ×100); `price_usd` 绝对价 USD; `supply_usd` 市值 USD; `trade_24h_usd` 24h 成交额 USD; `fundNetIn_24h_usd` 净流入 USD (负数=流出) | 免费版 | `{"coin_list":"bitcoin,ethereum"}` |
+| `coin_list` | List all coins. **硬上限 100 条**, 没有分页。要全量列表先用 `search` 翻页。 | 基础版 | None |
 | `coin_config` | Coin profile | 基础版 | `{"coin_list":"bitcoin"}` |
-| `funding_rate` | Funding rate (BTC only, aggregated) | 基础版 | `{"symbol":"BTC","interval":"8h"}` Weighted: add `"weighted":"true"` (基础版). For per-exchange real-time rates, use **aicoin-trading**: `node scripts/exchange.mjs funding_rate '{"exchange":"binance","symbol":"BTC/USDT:USDT"}'` |
+| `funding_rate` | Funding rate. ⚠️ **AiCoin 只覆盖 BTC**, 其他币传进去返空; 想查别的币用 `aicoin-trading exchange.mjs funding_rate`。**硬上限 100 条**。 | 基础版 | `{"symbol":"BTC","interval":"8h"}` Weighted (加权): 加 `"weighted":"true"` (走 vol-weight-history, 返空时有 `_note`) |
 | `trade_data` | Trade data | 基础版 | `{"symbol":"btcswapusdt:okcoinfutures"}` |
-| `ai_analysis` | AI analysis & prediction | 专业版 | `{"coin_keys":"[\"bitcoin\"]","language":"CN"}` |
-| `open_interest` | Open interest | 专业版 | `{"symbol":"BTC","interval":"15m"}` Coin-margined: add `"margin_type":"coin"` |
-| `liquidation_map` | Liquidation heatmap | 高级版 | `{"symbol":"btcswapusdt:binance","cycle":"24h"}` |
-| `liquidation_history` | Liquidation history | 高级版 | `{"symbol":"btcswapusdt:binance","interval":"1m"}` |
+| `ai_analysis` | AI analysis & prediction. 返空 list 是后端内容池滞后 (脚本加 `_note`), 非接口故障。 | 专业版 | `{"coin_keys":"[\"bitcoin\"]","language":"CN"}` |
+| `open_interest` | Open interest. **硬上限 100 条**。 | 专业版 | `{"symbol":"BTC","interval":"15m"}` Coin-margined: add `"margin_type":"coin"` |
+| `liquidation_map` | Liquidation heatmap | 高级版 | `{"symbol":"btcswapusdt:binance","cycle":"24h"}` `cycle` 仅 `24h` / `7d` |
+| `liquidation_history` | Liquidation history. **硬上限 100 条**。 | 高级版 | `{"symbol":"btcswapusdt:binance","interval":"1m"}` |
 | `estimated_liquidation` | Estimated liquidation | 专业版 | `{"symbol":"btcswapusdt:binance","cycle":"24h"}` |
-| `historical_depth` | Historical depth | 专业版 | `{"symbol":"btcswapusdt:okcoinfutures"}` |
-| `super_depth` | Large order depth >$10k | 专业版 | `{"symbol":"btcswapusdt:okcoinfutures"}` |
+| `historical_depth` | Historical depth. **硬上限 100 条**, 窗口短 (~100 秒)。 | 专业版 | `{"symbol":"btcswapusdt:okcoinfutures"}` |
+| `super_depth` | Large order depth ≥ amount (默认 $10k)。返空时脚本加 `_note` 提示 "窗口短或没大单, 调小 amount 或换交易对"。 | 专业版 | `{"symbol":"btcswapusdt:okcoinfutures","amount":"10000"}` |
 
 ### scripts/market.mjs — Market Data
 
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
-| `kline` | Standard K-line | 免费版 | `{"symbol":"btcusdt:okex","period":"3600","size":"100"}` period: 900/3600/14400/86400 |
-| `hot_coins` | Trending coins | 免费版 | `{"key":"defi"}` key: gamefi/anonymous/market/web/newcoin/stable/defi |
+| `kline` | Standard K-line. **时间戳是秒级 unix**, 不是毫秒。 | 免费版 | `{"symbol":"btcusdt:okex","period":"3600","size":"100"}` period: 900/3600/14400/86400 |
+| `hot_coins` | Trending coins. **实测只 `defi` 通**, `meme`/`new` 返空 (脚本加 `_note`)。查 meme 走 `coin.search '{"search":"meme"}'`。 | 免费版 | `{"key":"defi"}` (gamefi/anonymous/market/web/newcoin/stable/defi 字典见后端) |
 | `exchanges` | Exchange list | 免费版 | None |
-| `ticker` | Exchange tickers | 基础版 | `{"market_list":"okex,binance"}` |
+| `ticker` | ⚠️ **返的是平台整体 24h 资金净流入** (`fundNetInCny`/`fundNetInUsd`), **不是单币 OHLC**。单币行情用 `coin.coin_ticker` 或 `features.pair_ticker`。 | 基础版 | `{"market_list":"okex,binance"}` |
 | `futures_interest` | Futures OI ranking | 基础版 | `{"language":"cn"}` |
 | `depth_latest` | Real-time depth | 标准版 | `{"symbol":"btcswapusdt:binance"}` |
 | `indicator_kline` | Indicator K-line | 高级版 | `{"symbol":"btcswapusdt:binance","indicator_key":"fundflow","period":"3600"}` Optional: `open_time`, `since` |
@@ -159,7 +150,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | `depth_grouped` | Grouped depth | 高级版 | `{"symbol":"btcswapusdt:binance","groupSize":"100"}` |
 | `stock_quotes` | Stock quotes | 专业版 | `{"tickers":"i:mstr:nasdaq"}` |
 | `stock_top_gainer` | Top gainers | 专业版 | `{"us_stock":"true"}` |
-| `stock_company` | Company details | 专业版 | `{"symbol":"i:mstr:nasdaq"}` |
+| `stock_company` | Company details — 见 [Known Issues](#known-issues-broken--临时不稳的端点) 后端偶发 500 | 专业版 | `{"symbol":"i:mstr:nasdaq"}` |
 | `treasury_entities` | Holding entities | 专业版 | `{"coin":"BTC"}` |
 | `treasury_history` | Transaction history | 专业版 | `{"coin":"BTC"}` |
 | `treasury_accumulated` | Accumulated holdings | 专业版 | `{"coin":"BTC"}` |
@@ -172,18 +163,18 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
 | `pair_ticker` | Pair ticker | 免费版 | `{"key_list":"btcusdt:okex,btcusdt:huobipro"}` |
-| `ls_ratio` | Long/short ratio | 基础版 | None |
+| `ls_ratio` | Long/short ratio. ⚠️ **全局加权汇总, 不分交易所/币种**。返 `{last, last_day, last_week}` 三个数 (>1 多头占优, <1 空头占优)。Open API 没暴露 marketKey 过滤, 用户要看 Binance/OKX 单所多空比时老实告知"Open API 当前只返全局, 分交易所版去 aicoin.com 网页端"。 | 基础版 | None |
 | `nav` | Market navigation | 基础版 | `{"language":"cn"}` |
 | `pair_by_market` | Pairs by exchange | 基础版 | `{"market":"binance"}` |
-| `pair_list` | Pair list | 基础版 | `{"market":"binance","currency":"USDT"}` |
-| `grayscale_trust` | Grayscale trust | 标准版 | None |
-| `gray_scale` | Grayscale holdings (脚本自动把 BTC/ETH 转 bitcoin/ethereum) | 标准版 | `{"coins":"bitcoin,ethereum"}` |
+| `pair_list` | Pair list (必填 market) | 基础版 | `{"market":"binance","currency":"USDT"}` |
+| `grayscale_trust` | Grayscale trust 总览 (GBTC/ETHE) | 标准版 | None |
+| `gray_scale` | Grayscale 单币持仓细分。脚本自动把 BTC/ETH 转 bitcoin/ethereum。返空 detail 时脚本加 `_note`, 引导改用 `grayscale_trust`。 | 标准版 | `{"coins":"bitcoin,ethereum"}` |
 | `signal_alert` | Signal alerts | 标准版 | None |
 | `signal_config` | Alert config | 标准版 | `{"language":"cn"}` |
-| `strategy_signal` | ⚠️ **后端 broken**: SKILL.md 推荐参数实测全 400, agent 调用会拿到 `实测结论` 提示, 不要重试 | 标准版 | (broken) |
+| `strategy_signal` | 见 [Known Issues](#known-issues-broken--临时不稳的端点) — 后端 broken 脚本本地拦截 | 标准版 | — |
 | `change_signal` | Anomaly signal | 标准版 | `{"type":"1"}` |
-| `big_orders` | Whale orders. ⚠️ 仅支持 8 家 (binance/okcoinfutures/bybit/bitget/gate/coinbase/upbit). OKX 永续用 `okcoinfutures` 不是 `okex` (脚本自动转), bitget 永续 symbol 也自动转 `btcumcblusdt` | 标准版 | `{"symbol":"btcswapusdt:binance"}` |
-| `agg_trades` | 同 big_orders 覆盖范围。**注: bybit agg_trades 当前空数据** | 标准版 | `{"symbol":"btcswapusdt:binance"}` |
+| `big_orders` | Whale orders. ⚠️ **仅支持 8 家** (binance 永续+现货 / okcoinfutures(OKX 永续) / bybit / bitget / gate / coinbase / upbit), 其他交易所脚本本地拒绝。**`high_amount` 单位是合约张数不是币数量** (OKX 永续 1 张=0.01 BTC; Binance 永续 1 张=1 BTC), 用户输出**必须用美元金额 `high_turnover`**, 别报"X 张" / "X BTC"。 | 标准版 | `{"symbol":"btcswapusdt:binance"}` (OKX 永续传 `:okcoinfutures`, bitget 永续传 `btcumcblusdt:bitget`; 写错的也会被脚本自动转) |
+| `agg_trades` | 同 big_orders。**注: bybit agg_trades 当前后端返空 list** (success=true 但 list 长度 0), 调用方判长度。 | 标准版 | 同 big_orders |
 | `liquidation` | Liquidation data | 高级版 | `{"type":"1","coinKey":"bitcoin"}` |
 | `signal_alert_list` | Alert list | 专业版 | None |
 | `stock_market` | Crypto stocks | 专业版 | None |
@@ -215,7 +206,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | Action | Description | Min Tier | Params |
 |--------|-------------|----------|--------|
 | `search` | Search newsflash | 基础版 | `{"keyword":"bitcoin","page":"1","page_size":"20"}` |
-| `list` | Newsflash list with filters | 基础版 | `{"page_size":"20","language":"cn"}` |
+| `list` | Newsflash list. **返回结构** `{data:{isLive, list:[...]}}`, 每条最常用 4 字段: `timestamp` (秒级 unix, **不是 createtime/publish_time**), `title`, `content`, `is_important`/`is_pro`。双语版用 `transTitle`/`transContent`。 | 基础版 | `{"page_size":"20","language":"cn"}` |
 | `detail` | Newsflash full content | 标准版 | `{"flash_id":"123456"}` |
 
 ### scripts/airdrop.mjs — Airdrop (OpenData)
@@ -224,10 +215,10 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 |--------|-------------|----------|--------|
 | `all` | **综合查询（推荐）** — 同时查交易所空投+链上早期项目，合并返回 | 基础版 | `{"page_size":"20"}` Optional: `status`, `keyword`, `lan` |
 | `list` | Airdrop projects list (multi-source) | 基础版 | `{"source":"all","status":"ongoing","page":"1","page_size":"20","exchange":"binance"}` |
-| `detail` | Airdrop detail (hodler/xlaunch) | 标准版 | `{"type":"hodler","token":"SIGN"}` |
+| `detail` | Airdrop detail — 见 [Known Issues](#known-issues-broken--临时不稳的端点) 后端偶发 500 | 标准版 | `{"type":"hodler","token":"SIGN"}` |
 | `banner` | Hot airdrop banners | 基础版 | `{"limit":"5"}` |
 | `exchanges` | Available exchanges and activity types | 基础版 | `{"lan":"cn"}` |
-| `calendar` | Airdrop calendar (year+month required) | 标准版 | `{"year":"2026","month":"3"}` |
+| `calendar` | Airdrop calendar. 不传 year/month 时脚本默认当月。 | 标准版 | `{"year":"2026","month":"3"}` |
 
 **Source options for list:** `all`(default), `hodler`, `xlaunch`, `earncoin`, `alpha`, `bitget_launchpool`, `bitget_poolx`
 
@@ -243,7 +234,7 @@ All scripts: `node scripts/<name>.mjs <action> [json-params]`
 | `team` | Project team members | 标准版 | `{"airdrop_id":"xxx"}` |
 | `x_following` | Project X following list | 标准版 | `{"airdrop_id":"xxx"}` |
 | `status_changes` | Recent status changes | 标准版 | `{"days":"7","page":"1","page_size":"20"}` |
-| `tweets` | Search project tweets | 标准版 | `{"keywords":"bitcoin,airdrop","page_size":"20"}` |
+| `tweets` | Search project tweets. 不传 keywords 时脚本默认 `"airdrop"`。 | 标准版 | `{"keywords":"bitcoin,airdrop","page_size":"20"}` |
 
 ## Cross-Skill References
 
