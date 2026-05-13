@@ -85,7 +85,15 @@ cli({
     return apiGet('/api/upgrade/v2/coin/search', p);
   },
   // coin_info
-  coin_list: () => apiGet('/api/v2/coin'),
+  // 2026-05-13 dogfood v6 P1 #6: 名字误导, agent 看 "coin_list" 以为是批量行情查询,
+  // 但实际是币种字典 (无价格), 用 coin_list 参数也没过滤。这里加 _note 引导。
+  coin_list: async () => {
+    const json = await apiGet('/api/v2/coin');
+    if (json && typeof json === 'object') {
+      json._note = `coin_list 返回的是**币种字典** (coin_key / cn_name / en_name / hash_key), **没有价格/行情字段**, 也不接受过滤参数。想要价格/涨跌/市值用 \`coin_ticker '{"coin_list":"bitcoin,ethereum"}'\`, 想搜某币用 \`search '{"search":"BTC"}'\`。`;
+    }
+    return json;
+  },
   coin_ticker: async ({ coin_list } = {}) => {
     if (!coin_list) {
       return { success: false, errorCode: 400, error: 'coin_ticker 必填 coin_list (CSV, 例 "bitcoin,ethereum")', _note: 'coin_list 用 AiCoin 的 coin_key 命名 (bitcoin/ethereum/solana 等), 不是 ticker (BTC/ETH/SOL)。拿不准用 coin.search 查准确 coin_key。' };
@@ -147,6 +155,10 @@ cli({
     if (isWeighted && json && Array.isArray(json.data) && json.data.length === 0) {
       json._note = '加权资金费率 (vol-weight-history) 返回为空。这通常是上游窗口数据没填或当前 Pro 档没覆盖该 endpoint, 不是接口故障也不是参数错。可改用 weighted=false 拿普通资金费率历史, 或告知用户后再决定是否继续。';
     }
+    // 2026-05-13 dogfood v6 P1 #9: 非 8h 返空时引导用 8h (HL/币安等标准 funding 结算周期)。
+    if (!isWeighted && json && Array.isArray(json.data) && json.data.length === 0 && _interval !== '8h') {
+      json._note = `funding_rate ${_interval} 返空。资金费率上游主要覆盖**标准结算周期 8h** (binance/bybit/okx 永续都是 8 小时一结算), 1h/4h 等非标周期常态返空。**改用 interval="8h" 或 "1d" 再试**。这不是接口故障。`;
+    }
     if (json && Array.isArray(json.data) && json.data.length > 0) {
       const periodsPerYear = _interval === '8h' ? 3 * 365 : _interval === '1h' ? 24 * 365 : _interval === '4h' ? 6 * 365 : null;
       json._field_doc = `open/high/low/close 是裸 ${_interval} 周期速率 (**不是年化, 不是百分比**)。${periodsPerYear ? `年化 ≈ rate × ${periodsPerYear} (该周期一年发生 ${periodsPerYear} 次)。例: 5e-5/8h ≈ 5.5%/年。` : ''} 正值 = 多头付空头 (多头情绪强), 负值反之。time 字段是毫秒 epoch。`;
@@ -161,12 +173,19 @@ cli({
     if (leverage) p.leverage = leverage;
     return apiGet('/api/upgrade/v2/futures/liquidation/map', p);
   },
-  liquidation_history: ({ symbol, interval, period, cycle, limit = '100', start_time, end_time } = {}) => {
+  // 2026-05-13 dogfood v6 P1 #7: 接受 dbkey 别名 (跟 liquidation_map / estimated_liquidation 对齐)。
+  // 实测大部分 interval / dbkey 都返空 (上游覆盖差), 空数据加 _note 引导用替代端点。
+  liquidation_history: async ({ symbol, dbkey, interval, period, cycle, limit = '100', start_time, end_time } = {}) => {
     const _interval = interval || period || cycle || '1d';
-    const p = { symbol: resolveSymbol(symbol), interval: _interval, limit };
+    const _sym = symbol || dbkey;
+    const p = { symbol: resolveSymbol(_sym), interval: _interval, limit };
     if (start_time) p.start_time = start_time;
     if (end_time) p.end_time = end_time;
-    return apiGet('/api/upgrade/v2/futures/liquidation/history', p);
+    const json = await apiGet('/api/upgrade/v2/futures/liquidation/history', p);
+    if (json && Array.isArray(json.data) && json.data.length === 0) {
+      json._note = `liquidation_history 对 ${_sym || '?'} (${_interval}) 返空。上游对该 symbol / interval 没数据 — 不是接口故障也不是付费墙。**替代**: liquidation_map (清算分布地图) 或 estimated_liquidation (按杠杆预估清算)。`;
+    }
+    return json;
   },
   estimated_liquidation: ({ symbol, dbkey, cycle, interval, period, leverage, limit = '5', start_time, end_time } = {}) => {
     const _cycle = cycle || interval || period || '24h';
@@ -192,7 +211,13 @@ cli({
       : '/api/upgrade/v2/futures/open-interest/aggregated-stablecoin-history';
     const p = { symbol: resolved, interval: _interval, limit };
     if (start_time) p.start_time = start_time; if (end_time) p.end_time = end_time;
-    return apiGet(path, p);
+    const json = await apiGet(path, p);
+    // 2026-05-13 dogfood v6 P1 #10: 实测 BTC 也常返空 (跟 funding_rate 一样, AiCoin 这个接口
+    // 上游数据稀疏)。空数据加 _note 避免 agent 误判 OI 真为零。
+    if (json && Array.isArray(json.data) && json.data.length === 0) {
+      json._note = `open_interest 返空 (BTC ${_interval})。 AiCoin 这个接口上游数据稀疏, **不是 OI 真为零**, 不是接口故障也不是参数错。**替代**: hl-market \`oi_summary\` / \`oi_top_coins\` / \`oi_history\` 看 HL 的 OI; 或 exchange skill 拿 binance/bybit 的 OI: \`exchange.mjs open_interest '{"exchange":"binance","symbol":"BTC/USDT:USDT"}'\`。`;
+    }
+    return json;
   },
   // coin_futures_data
   historical_depth: ({ symbol, key, limit = '100', start_time, end_time }) => {
@@ -220,8 +245,29 @@ cli({
   // Aliases: actions models often mis-route here from features.mjs
   big_orders: ({ symbol }) => apiGet('/api/v2/order/bigOrder', { symbol: resolveSymbol(symbol) }),
   whale_orders: ({ symbol }) => apiGet('/api/v2/order/bigOrder', { symbol: resolveSymbol(symbol) }),
-  ls_ratio: () => apiGet('/api/v2/mix/ls-ratio'),
-  long_short_ratio: () => apiGet('/api/v2/mix/ls-ratio'),
+  // 2026-05-13 dogfood v6 P1 #8: ls_ratio / long_short_ratio 接口不接受 symbol / interval / market
+  // 等参数, 返的是**全市场聚合多空比**, 不区分币种 / 交易所。agent 传 symbol 时静默忽略,
+  // 容易误以为是某币某交易所数据。加 _field_doc 说清楚口径, 顺便接受所有参数避免报错。
+  ls_ratio: async (args = {}) => {
+    const json = await apiGet('/api/v2/mix/ls-ratio');
+    if (json && typeof json === 'object') {
+      json._field_doc = `**全市场聚合多空比 (BTC 永续口径)**, 接口不接受 symbol / interval / market 参数 — 传了也是 silent ignore。\n字段: data.detail.last (string, 当前比值, <1 = 空头偏多) / last_day (number, 24h 前比值) / last_week (string, 7d 前比值)。\n例: 0.84 表示多空头寸价值比 84:100, 空头略占优。\n想看 HL 特定鲸鱼地址的多空走向用 hl-market \`whale_directions\` / \`whale_history_ratio\`。`;
+      if (args.symbol || args.interval || args.market) {
+        json._note = `ls_ratio 接口不区分币种 / 交易所, 你传的 symbol=${args.symbol || '-'} / interval=${args.interval || '-'} 已被上游忽略。返回的是 BTC 全市场永续聚合多空比。需特定币种 / 交易所看 features.ls_ratio 或 HL whale_directions。`;
+      }
+    }
+    return json;
+  },
+  long_short_ratio: async (args = {}) => {
+    const json = await apiGet('/api/v2/mix/ls-ratio');
+    if (json && typeof json === 'object') {
+      json._field_doc = `**全市场聚合多空比 (BTC 永续口径)**, 接口不接受 symbol / interval / market 参数 — 传了也是 silent ignore。字段同 ls_ratio。 long_short_ratio 是 ls_ratio 的别名, 两者完全等价。`;
+      if (args.symbol || args.interval || args.market) {
+        json._note = `long_short_ratio 接口不区分币种 / 交易所, 你传的参数已被上游忽略, 返聚合数据。`;
+      }
+    }
+    return json;
+  },
 
   // API Key status check — run this when user asks about AiCoin API key config/safety
   api_key_info: async ({ probe } = {}) => {

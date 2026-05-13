@@ -36,6 +36,11 @@ Crypto market data toolkit powered by [AiCoin Open API](https://www.aicoin.com/o
 - **`airdrop.detail`** — 当前 key 档位不够时上游返 **HTTP 403 付费墙** (不是 500 后端故障)。脚本会带"档位不够"提示。**替代**: `airdrop.list / banner / calendar` 拿简要信息
 - **`drop_radar.detail`** — 同 airdrop.detail, 当前 key 档位不够时返 403。**替代**: `drop_radar.list` 已含项目基础信息
 - **`hl-trader.accounts`** (aicoin-hyperliquid) — 后端偶发 500。**替代**: `statistics + batch_clearinghouse_state`
+- **`hl-trader.statistics`** (aicoin-hyperliquid) — 跟 `accounts` 同样接受 `addresses` 数组参数, 不传时上游返 400 "请求体无效" (不是 SDK 报错)。本地未拦截。**正确用法**: `{"addresses":["0x...", "0x..."]}` 或 CSV string。
+- **`coin.ai_analysis` / `coin.ai_coins`** — AiCoin 后端 AI 解读内容池**当前整体稀疏** (BTC / ETH / HYPE 等主流币都返 `data.list=[]`)。脚本已加 _note 引导, 但 agent 别误以为单个币种问题, 实测多币种都空。**不是接口故障也不是付费问题**, 是后端内容运营问题, 别浪费签名重试。
+- **`coin.historical_depth` / `coin.super_depth`** — 后端长期返 500 "Failed to get (super) depth"。脚本会带后端故障提示。**替代**: `market.depth_latest / depth_full / depth_grouped` (注意是 `dbKey` 而非 `dbkey`, 脚本两种大小写都接受)。
+- **`coin.open_interest` / `coin.liquidation_history`** — 即便 BTC 也常返空 (上游数据稀疏)。脚本加了空数据 _note 引导用 hl-market / exchange skill 替代。**不是 OI/清算真为零**。
+- **`hl-trader.batch_clearinghouse_state` / `batch_spot_clearinghouse_state`** — 后端偶发 500 "Internal Server Error"。**替代**: 单地址多次调 `info '{"type":"clearinghouseState","address":"0x..."}'` 拼起来。
 - **上游 5xx 通用响应** — 任何端点拿到 HTTP 502/503/504 是 AiCoin 网关临时故障(可重试 1-2 分钟), 拿到 500/501/505+ 是后端异常(直接引导用户联系 service@aicoin.com), 不要让用户改参数
 
 ## 跨接口字段约定 (agent 必读, 单接口看不出的坑)

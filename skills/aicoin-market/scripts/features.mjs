@@ -118,8 +118,28 @@ cli({
     return json;
   },
   // trading_pair
-  pair_ticker: ({ key_list }) => apiGet('/api/v2/trading-pair/ticker', { key_list }),
-  pair_by_market: ({ market }) => apiGet('/api/v2/trading-pair/getTradingPair', { market }),
+  // 2026-05-13 dogfood v6 P1 #19: pair_ticker / pair_by_market 不传必填参数时上游返空,
+  // agent 看到 data:[] 困惑。本地预检, 跟 pair_list 风格一致。
+  pair_ticker: ({ key_list }) => {
+    if (!key_list) {
+      return Promise.resolve({
+        success: false, errorCode: 400,
+        error: 'pair_ticker 必填 key_list (CSV, 例 "btcusdt:binance,ethusdt:binance")',
+        _note: 'key_list 是完整 market pair 格式 (币种+计价+交易所)。需要短名解析改用 coin.coin_ticker。 不传上游会静默返空。',
+      });
+    }
+    return apiGet('/api/v2/trading-pair/ticker', { key_list });
+  },
+  pair_by_market: ({ market }) => {
+    if (!market) {
+      return Promise.resolve({
+        success: false, errorCode: 400,
+        error: 'pair_by_market 必填 market 参数 (例: binance/okex/bybit)',
+        _note: '不传 market 上游返空 list, 看起来像接口故障实际是参数错。先用 market.exchanges 查支持的交易所。',
+      });
+    }
+    return apiGet('/api/v2/trading-pair/getTradingPair', { market });
+  },
   pair_list: ({ market, currency, show }) => {
     if (!market) {
       return Promise.resolve({

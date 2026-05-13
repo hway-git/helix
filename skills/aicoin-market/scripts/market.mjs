@@ -51,6 +51,17 @@ function resolveKlinePeriod(period) {
   return PERIOD_ALIASES[s] || s;
 }
 
+// 2026-05-13 dogfood v6 P1 #14: 把 FGI 数值映射成区间标签, agent 读懂数字背后情绪。
+function interpretFGI(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '无效数值';
+  if (n < 25) return '极度恐慌 (Extreme Fear, 历史上常对应底部区间)';
+  if (n < 45) return '恐慌 (Fear)';
+  if (n < 55) return '中性 (Neutral)';
+  if (n < 75) return '贪婪 (Greed)';
+  return '极度贪婪 (Extreme Greed, 历史上常对应顶部区间)';
+}
+
 // treasury_* 系列只覆盖 BTC / ETH 上市公司持币数据, 其他币 AiCoin 没数据源。
 // 2026-05-13 dogfood: 6 个 treasury_* action 拦截文案要一致, 不能光给 error
 // 还得给 _note 引导外部数据源, 否则 agent 拿到 400 后只会让用户改 coin 重试。
@@ -152,6 +163,16 @@ cli({
     if (Array.isArray(list) && list.length === 0) {
       json._note = `hot_coins '${key}' 返空。后端 key 字典有限 (实测仅 'defi' 通, 'meme'/'new' 返空)。想查 meme 热门币改用 coin.mjs search '{"search":"meme","trade_type":"spot"}', 这不是接口故障。`;
     }
+    // 2026-05-13 dogfood v6 P1 #12: 后端在 price 字段类型不一致 — 有时是 string "10.70",
+    // 无最新报价的币会塞 boolean false。agent 拿 false 当数字算就 NaN。统一归一化:
+    // false → null, 数字字符串保留 string (跟其他接口一致)。同时加 _field_doc。
+    if (Array.isArray(list) && list.length > 0) {
+      let normalized = 0;
+      for (const item of list) {
+        if (item && item.price === false) { item.price = null; normalized++; }
+      }
+      json._field_doc = `price 字段类型: 通常是数字字符串 (例 "10.70"), 但**当某币当前无最新报价时, AiCoin 后端会返 boolean false** — SDK 已归一化为 null${normalized > 0 ? ` (本次 ${normalized} 个币命中)` : ''}。判断价格用 \`item.price != null && parseFloat(item.price) > 0\`, 别假设类型一致。`;
+    }
     return json;
   },
   futures_interest: ({ language, lan, page, page_size, pageSize, currency } = {}) => {
@@ -166,11 +187,14 @@ cli({
   },
   // kline
   // 2026-05-13 P0 #5: 接受 interval / cycle 当 period alias (agent 跨 script 切换易混)
-  kline: async ({ symbol, period, interval, cycle, size = '100', since, open_time } = {}) => {
+  // 2026-05-13 dogfood v6 P1 #11: kline 用 size 参数, 其他接口都用 limit, agent 跨 script
+  // 切换易混淆。接受 limit / count 当 size 别名。
+  kline: async ({ symbol, period, interval, cycle, size, limit, count, since, open_time } = {}) => {
     const _period = period || interval || cycle;
+    const _size = size || limit || count || '100';
     if (!symbol) return { error: 'symbol is required. Example: "btcusdt:okex" or short name "btc"' };
     if (!_period) return { error: 'period (or interval/cycle alias) is required. 自然名 "1m / 5m / 15m / 30m / 1h / 4h / 1d / 1w" 或秒数字符串 "60 / 300 / 900 / 1800 / 3600 / 14400 / 86400 / 604800" 都可。' };
-    const p = { symbol: resolveKlineSymbol(symbol), period: resolveKlinePeriod(_period), size };
+    const p = { symbol: resolveKlineSymbol(symbol), period: resolveKlinePeriod(_period), size: _size };
     if (since) p.since = since;
     if (open_time) p.open_time = open_time;
     return apiGet('/api/v2/commonKline/dataRecords', p);
@@ -210,6 +234,9 @@ cli({
   // index_data
   // 2026-05-13 P0 #1 dogfood: 后端 key 是 "i:fgi:alternative" 这种内部命名, 不是 "fearGreedy"。
   // agent 用常识名 100% 触发 invalid_key 304。SDK resolveIndexKey 做常识 → 内部 map。
+  // 2026-05-13 dogfood v6 P1 #14: 加 _field_doc 解释:
+  // (1) FGI 区间 (0-25 极度恐慌 / 25-45 恐慌 / 45-55 中性 / 55-75 贪婪 / 75-100 极度贪婪)
+  // (2) VIX/BLX 等指数 price 字段返 "-" 表数据缺失 (不是 0, 不是 NaN, 不是 接口故障)
   index_price: async ({ key, currency } = {}) => {
     const _key = resolveIndexKey(key);
     const p = { key: _key };
@@ -217,6 +244,18 @@ cli({
     const json = await apiGet('/api/v2/index/indexPrice', p);
     if (_key !== key && json && json.success !== false && json.errorCode !== 304) {
       json._note = `key "${key}" 已自动纠正为后端格式 "${_key}"。下次直接传纠正后的名字省一步。AiCoin index key 命名跟常识不一致 (后端用 "i:fgi:alternative" 这种内部 ID), 完整 key 列表用 index_list 拉。`;
+    }
+    if (json && json.data && typeof json.data === 'object') {
+      const isFGI = /fgi|fear/i.test(_key || '') || /fgi|fear/i.test(key || '');
+      const priceVal = json.data.price;
+      const fields = ['price 字段含义随 key 不同 (恐惧贪婪指数 = 0-100 数字 / VIX / BLX = 数值, 部分指数返 "-" 表上游数据缺失而非 0)。'];
+      if (isFGI) {
+        fields.push(`**FGI 解读区间**: 0-25 极度恐慌 (Extreme Fear, 反向看多窗口) / 25-45 恐慌 / 45-55 中性 / 55-75 贪婪 / 75-100 极度贪婪 (Extreme Greed, 反向看空窗口)。当前 ${priceVal} = ${interpretFGI(priceVal)}。`);
+      }
+      if (priceVal === '-' || priceVal === '' || priceVal == null) {
+        fields.push(`**当前 price = "${priceVal}"** 表上游该指数本时段无报价 (VIX/BLX 等海外指数常态, 不是接口故障)。`);
+      }
+      json._field_doc = fields.join(' ');
     }
     return json;
   },
@@ -231,11 +270,21 @@ cli({
     }
     return json;
   },
-  index_list: () => apiGet('/api/v2/index/getIndex'),
+  index_list: async () => {
+    const json = await apiGet('/api/v2/index/getIndex');
+    if (json && Array.isArray(json?.data?.list)) {
+      const missing = json.data.list.filter(it => it && (it.price === '-' || it.price === '' || it.price == null)).map(it => it.show || it.key).filter(Boolean);
+      json._field_doc = `list 里每项的 price 字段: 通常是数值字符串 (例 "42", "6.7905"), 但 **VIX / BLX / 部分海外指数返 "-"** 表上游该指数本时段无报价 (不是 0, 不是接口故障, 是数据源限制)。${missing.length > 0 ? `本次返空的指数: ${missing.join(', ')}。` : ''} **FGI (恐惧贪婪指数) 解读**: 0-25 极度恐慌 / 25-45 恐慌 / 45-55 中性 / 55-75 贪婪 / 75-100 极度贪婪。`;
+    }
+    return json;
+  },
   // crypto_stock
   // 2026-05-13 P0 #2 dogfood: 之前 _note 误导 — MSTR/COIN/TSLA 明明在名单内, 返空时 _note
   // 却说"不在名单", 让 agent 让用户换 symbol。现在区分 "白名单内但上游空窗" vs "真不在名单"。
-  stock_quotes: async ({ tickers } = {}) => {
+  // 2026-05-13 dogfood v6 P1 #13: 接受 symbols / symbol / ticker 当 tickers 别名 (agent 跨脚本切换时
+  // 容易传成 symbols, 跟 coin_ticker.coin_list / coin.search 等参数名习惯混淆)。
+  stock_quotes: async (args = {}) => {
+    const tickers = args.tickers || args.symbols || args.symbol || args.ticker;
     const p = {};
     if (tickers) p.tickers = tickers;
     const json = await apiGet('/api/upgrade/v2/crypto_stock/quotes', p);
@@ -326,17 +375,20 @@ cli({
     if (coin && !/^(BTC|ETH)$/i.test(coin)) return treasuryUnsupportedCoin('treasury_summary', coin);
     return apiGet('/api/upgrade/v2/coin-treasuries/summary', { coin });
   },
-  // depth
-  depth_latest: ({ symbol, dbKey, size }) => {
-    const p = { dbKey: symbol || dbKey };
-    if (size) p.size = size;
+  // depth — 2026-05-13 dogfood v6 P0 #1: 上游 body 字段是 dbKey (camelCase, K 大写),
+  // 但 SKILL.md 跨接口约定用 dbkey (小写, 跟 liquidation_map / historical_depth / trade_data 一致)。
+  // agent 传小写时 silent fail (返 Invalid dbKey)。接受三种大小写 + symbol 别名。
+  depth_latest: ({ symbol, dbKey, dbkey, dbKEY, size, limit }) => {
+    const _k = symbol || dbKey || dbkey || dbKEY;
+    const p = { dbKey: _k };
+    if (size || limit) p.size = size || limit;
     return apiGet('/api/upgrade/v2/futures/latest-depth', p);
   },
-  depth_full: ({ symbol, dbKey }) => apiGet('/api/upgrade/v2/futures/full-depth', { dbKey: symbol || dbKey }),
-  depth_grouped: ({ symbol, dbKey, groupSize }) => {
+  depth_full: ({ symbol, dbKey, dbkey, dbKEY }) => apiGet('/api/upgrade/v2/futures/full-depth', { dbKey: symbol || dbKey || dbkey || dbKEY }),
+  depth_grouped: ({ symbol, dbKey, dbkey, dbKEY, groupSize, group_size }) => {
     // 实测: groupSize 必填且必须数字字符串, 不传上游 400。
     // 默认 100 (合理的价格粒度, 主流币 BTC ~0.1%)。
-    const gs = groupSize || '100';
-    return apiGet('/api/upgrade/v2/futures/full-depth/grouped', { dbKey: symbol || dbKey, groupSize: gs });
+    const gs = groupSize || group_size || '100';
+    return apiGet('/api/upgrade/v2/futures/full-depth/grouped', { dbKey: symbol || dbKey || dbkey || dbKEY, groupSize: gs });
   },
 });

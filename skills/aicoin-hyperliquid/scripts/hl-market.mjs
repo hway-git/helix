@@ -4,11 +4,13 @@ import { apiGet, apiPost, cli } from '../lib/aicoin-api.mjs';
 
 cli({
   // P2 #4: tickers 返回里混 "@241" "@248" 这种 HL 内部 spot token id, 跟正常 "BTC" / "ETH" 一起列。
-  // agent 不知道 @xxx 是啥, 加 _field_doc 解释。
+  // 2026-05-13 dogfood v6 P1 #21: 还有 "xyz:MSFT" / "cash:SILVER" 这种 HL Builder Coins
+  // (第三方建的合约, 比如股票/商品衍生品), 跟 BTC/@xxx 都不同。补充 _field_doc。
+  // agent 不知道 @xxx / xyz:XXX / cash:XXX 是啥, 加 _field_doc 解释。
   tickers: async () => {
     const json = await apiGet('/api/upgrade/v2/hl/tickers');
     if (json && typeof json === 'object') {
-      json._field_doc = `coin 字段格式: (1) 大写字母 (BTC/ETH/SOL/HYPE 等) = HL 永续合约的标准命名; (2) "@<数字>" (@241 / @248 等) = HL 现货 spot 的内部 token id, 不是永续, 命名是数字 ID 因为 HL 现货上市的代币太多。完整 spot 映射查 HL 官方 spot metadata。**永续看 BTC/ETH 等大写, 现货走 @xxx**, 别混。`;
+      json._field_doc = `coin 字段共 4 种格式: (1) **大写字母** (BTC/ETH/SOL/HYPE 等) = HL 官方永续合约的标准命名; (2) **"@<数字>"** (@241 / @248 等) = HL 现货 spot 的内部 token id, 不是永续, 命名是数字 ID 因为 HL 现货上市的代币太多, 完整映射查 HL 官方 spot metadata; (3) **"xyz:XXX"** (xyz:MSFT / xyz:TSLA / xyz:AMD 等) = HL **Builder Coins** (第三方在 HL 上建的合约, 通常是股票永续衍生品 — xyz: 前缀是 builder 名字); (4) **"cash:XXX"** (cash:SILVER / cash:GOLD / cash:CL 等) = HL Builder 现货商品衍生品。**永续 → 大写; 现货 → @xxx; 股票永续 → xyz:; 商品 → cash:**。别混。`;
     }
     return json;
   },

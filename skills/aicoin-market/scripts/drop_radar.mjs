@@ -102,13 +102,24 @@ cli({
   },
   // 2026-05-13 P0 #3: events / x_following / team 返的 itemName / name / oName 等字段是
   // stringified i18n JSON, SDK 自动 parse 一层, agent 不用再 JSON.parse。
+  // 2026-05-13 dogfood v6 P1 #15: 三个端点都必填 airdrop_id, 不传时上游直接 500,
+  // agent 误以为后端故障。本地预检, 引导用 list 拿 airdrop_id。
   events: async ({ airdrop_id } = {}) => {
+    if (!airdrop_id) {
+      return { success: false, errorCode: 400, error: 'events 必填 airdrop_id', _note: 'airdrop_id 来源: drop_radar.list 返回项里的 airdropId 字段。不传上游会返 500, 看起来像接口故障实际是参数错。' };
+    }
     return parseI18nFields(await apiGet('/api/upgrade/v2/content/drop-radar/events', { airdrop_id }));
   },
   team: async ({ airdrop_id } = {}) => {
+    if (!airdrop_id) {
+      return { success: false, errorCode: 400, error: 'team 必填 airdrop_id', _note: 'airdrop_id 来源: drop_radar.list 返回项里的 airdropId 字段。不传上游会返 500, 看起来像接口故障实际是参数错。' };
+    }
     return parseI18nFields(await apiGet('/api/upgrade/v2/content/drop-radar/team', { airdrop_id }));
   },
   x_following: async ({ airdrop_id } = {}) => {
+    if (!airdrop_id) {
+      return { success: false, errorCode: 400, error: 'x_following 必填 airdrop_id', _note: 'airdrop_id 来源: drop_radar.list 返回项里的 airdropId 字段。不传上游会返 500, 看起来像接口故障实际是参数错。' };
+    }
     return parseI18nFields(await apiGet('/api/upgrade/v2/content/drop-radar/x-following', { airdrop_id }));
   },
   status_changes: async ({ days, page, page_size, lan } = {}) => {

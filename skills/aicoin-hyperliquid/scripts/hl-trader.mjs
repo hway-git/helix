@@ -30,11 +30,40 @@ function toNum(v) {
 // 2026-05-13 P0 #5 dogfood: 时间字段 alias — hl-trader 内部叫 period/days, 但 agent
 // 跨 script 切换易混淆 (hl-market 用 interval, coin 用 cycle/interval)。
 // pickPeriod / pickDays 接受 interval / cycle / period / days 互相 alias。
+// 2026-05-13 dogfood v6: HL 后端 stats/排行/batch 接口 period 只认纯数字 (天数),
+// agent 传 "7d" / "1d" / "30day" 等自然名 → 400 "查询参数无效"。SDK 自动剥后缀。
+function normalizePeriod(v) {
+  if (v == null) return v;
+  const s = String(v).trim().toLowerCase();
+  // "7d" / "1d" / "30day" / "7days" → "7" / "1" / "30" / "7"
+  const m = s.match(/^(\d+)\s*(d|day|days)?$/);
+  if (m) return m[1];
+  return v; // 不是常见格式留给上游报错
+}
 function pickPeriod(args, defaultValue) {
-  return args.period ?? args.interval ?? args.cycle ?? args.timeframe ?? defaultValue;
+  return normalizePeriod(args.period ?? args.interval ?? args.cycle ?? args.timeframe ?? defaultValue);
 }
 function pickDays(args, defaultValue) {
-  return args.days ?? args.day ?? args.period ?? args.interval ?? defaultValue;
+  return normalizePeriod(args.days ?? args.day ?? args.period ?? args.interval ?? defaultValue);
+}
+
+// 2026-05-13 dogfood v6 P0 #3: batch_* 接口接受 addresses 参数,
+// agent 容易传 CSV 字符串 (跟其他接口对齐). 原 fallback 把整个 CSV
+// 当一个 address, 上游静默返空或拼接错乱。统一 split.
+function normalizeAddresses(addrs) {
+  if (Array.isArray(addrs)) return addrs;
+  if (typeof addrs !== 'string') return addrs;
+  const trimmed = addrs.trim();
+  if (trimmed.startsWith('[')) {
+    try {
+      const arr = JSON.parse(trimmed);
+      return Array.isArray(arr) ? arr : [arr];
+    } catch { /* fallthrough */ }
+  }
+  if (trimmed.includes(',')) {
+    return trimmed.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  return trimmed ? [trimmed] : [];
 }
 
 // HL 后端的 completed_* 端点对 "未知 positionId" 是塞到 HTTP 200 的 body
@@ -120,7 +149,7 @@ cli({
   },
   accounts: async ({ addresses }) => {
     let addrs = addresses;
-    if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
+    addrs = normalizeAddresses(addrs);
     try {
       return await apiPost('/api/upgrade/v2/hl/traders/accounts', { addresses: addrs });
     } catch (e) {
@@ -136,9 +165,17 @@ cli({
       throw e;
     }
   },
-  statistics: ({ addresses }) => {
-    let addrs = addresses;
-    if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
+  // P1 #22 dogfood v6: 跟 accounts 一样要 addresses 数组, 不传时上游 400 "请求体无效"。
+  // 本地预检 + 接受 CSV/JSON 别名。
+  statistics: ({ addresses, address }) => {
+    const addrs = normalizeAddresses(addresses || address);
+    if (!Array.isArray(addrs) || addrs.length === 0) {
+      return Promise.resolve({
+        success: false, errorCode: 400,
+        error: 'statistics 必填 addresses (HL 钱包地址数组或 CSV string)',
+        _note: '例: {"addresses":["0x...","0x..."]} 或 {"addresses":"0x...,0x..."}。先用 smart_find 拿聪明钱列表, 或让用户提供。不传时上游返 400 "请求体无效"。',
+      });
+    }
     return apiPost('/api/upgrade/v2/hl/traders/statistics', { addresses: addrs });
   },
   // hl_fills — P1 #3: 空数据 _note 引导
@@ -151,8 +188,20 @@ cli({
     }
     return json;
   },
-  fills_by_oid: ({ oid }) => apiGet(`/api/upgrade/v2/hl/fills/oid/${oid}`),
-  fills_by_twapid: ({ twapid }) => apiGet(`/api/upgrade/v2/hl/fills/twapid/${twapid}`),
+  // P0 #5 dogfood v6: 4 个 by_oid 接口缺参时上游返 "invalid oid", agent 困惑。
+  // 本地预检 + _note 引导 oid 来源。
+  fills_by_oid: ({ oid }) => {
+    if (oid == null || oid === '') {
+      return Promise.resolve({ success: false, errorCode: 400, error: 'fills_by_oid 必填 oid (订单 ID, 数字)', _note: 'oid 来源: fills / orders_latest / filled_orders 返回项里的 oid 字段。' });
+    }
+    return apiGet(`/api/upgrade/v2/hl/fills/oid/${oid}`);
+  },
+  fills_by_twapid: ({ twapid }) => {
+    if (twapid == null || twapid === '') {
+      return Promise.resolve({ success: false, errorCode: 400, error: 'fills_by_twapid 必填 twapid (TWAP 任务 ID, 数字)', _note: 'twapid 来源: twap_states 返回项里的 twapId 字段。' });
+    }
+    return apiGet(`/api/upgrade/v2/hl/fills/twapid/${twapid}`);
+  },
   top_trades: ({ coin, interval, period, cycle, limit } = {}) => {
     // 实测: interval 必填, 默认 1h. P0 #5 alias: 接受 period/cycle.
     const _interval = interval || period || cycle || '1h';
@@ -169,13 +218,23 @@ cli({
     }
     return json;
   },
-  order_by_oid: ({ oid }) => apiGet(`/api/upgrade/v2/hl/orders/oid/${oid}`),
+  order_by_oid: ({ oid }) => {
+    if (oid == null || oid === '') {
+      return Promise.resolve({ success: false, errorCode: 400, error: 'order_by_oid 必填 oid (订单 ID, 数字)', _note: 'oid 来源: orders_latest / filled_orders 返回项里的 oid 字段。' });
+    }
+    return apiGet(`/api/upgrade/v2/hl/orders/oid/${oid}`);
+  },
   filled_orders: ({ address, coin, limit } = {}) => {
     const err = requireAddress(address); if (err) return Promise.resolve(err);
     const p = {}; if (coin) p.coin = coin; if (limit) p.limit = limit;
     return apiGet(`/api/upgrade/v2/hl/filled-orders/${address}/latest`, p);
   },
-  filled_by_oid: ({ oid }) => apiGet(`/api/upgrade/v2/hl/filled-orders/oid/${oid}`),
+  filled_by_oid: ({ oid }) => {
+    if (oid == null || oid === '') {
+      return Promise.resolve({ success: false, errorCode: 400, error: 'filled_by_oid 必填 oid (订单 ID, 数字)', _note: 'oid 来源: filled_orders 返回项里的 oid 字段。' });
+    }
+    return apiGet(`/api/upgrade/v2/hl/filled-orders/oid/${oid}`);
+  },
   top_open: ({ coin, minVal, min_val, limit }) => {
     const p = {}; if (coin) p.coin = coin; if (minVal || min_val) p.minVal = minVal || min_val; if (limit) p.limit = limit;
     return apiGet('/api/upgrade/v2/hl/orders/top-open-orders', p);
@@ -318,7 +377,10 @@ cli({
   // hl_advanced
   // 2026-05-13 dogfood: info 当前是 raw apiPost, 传错 type ("userState") 后端 400 没列枚举。
   // 加合法 type 列表 + 别名修正 + 错误时引导。
-  info: async ({ type, user, extra_params } = {}) => {
+  // P0 #4 dogfood v6: hl-trader 其他接口都用 address, 唯独 info 用 user (HL 后端字段名)。
+  // 接受 address 当 user 别名, 跟同模块对齐。
+  info: async ({ type, user, address, extra_params } = {}) => {
+    const _user = user || address;
     const COMMON_TYPES = [
       'clearinghouseState', 'spotClearinghouseState', 'portfolio',
       'meta', 'spotMeta', 'allMids', 'l2Book', 'candleSnapshot',
@@ -343,7 +405,7 @@ cli({
     const resolvedType = ALIASES[type] || type;
     const aliasUsed = resolvedType !== type;
     const body = { type: resolvedType };
-    if (user) body.user = user;
+    if (_user) body.user = _user;
     if (extra_params) {
       try { Object.assign(body, typeof extra_params === 'string' ? JSON.parse(extra_params) : extra_params); } catch {}
     }
@@ -396,7 +458,7 @@ cli({
   batch_pnls: (args = {}) => {
     const { addresses, scope } = args;
     let addrs = addresses;
-    if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
+    addrs = normalizeAddresses(addrs);
     const body = { addresses: addrs };
     const period = pickPeriod(args);
     if (period != null) body.period = toNum(period);
@@ -406,7 +468,7 @@ cli({
   batch_addr_stat: (args = {}) => {
     const { addresses } = args;
     let addrs = addresses;
-    if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
+    addrs = normalizeAddresses(addrs);
     const body = { addresses: addrs };
     const period = pickPeriod(args);
     if (period != null) body.period = toNum(period);
@@ -432,19 +494,19 @@ cli({
   },
   batch_clearinghouse_state: ({ addresses, dex }) => {
     let addrs = addresses;
-    if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
+    addrs = normalizeAddresses(addrs);
     const body = { addresses: addrs }; if (dex) body.dex = dex;
     return apiPost('/api/upgrade/v2/hl/traders/clearinghouse-state', body);
   },
   batch_spot_clearinghouse_state: ({ addresses }) => {
     let addrs = addresses;
-    if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
+    addrs = normalizeAddresses(addrs);
     return apiPost('/api/upgrade/v2/hl/traders/spot-clearinghouse-state', { addresses: addrs });
   },
   batch_max_drawdown: (args = {}) => {
     const { addresses, scope } = args;
     let addrs = addresses;
-    if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
+    addrs = normalizeAddresses(addrs);
     const body = { addresses: addrs };
     const days = pickDays(args);
     if (days != null) body.days = toNum(days);
@@ -454,7 +516,7 @@ cli({
   batch_net_flow: (args = {}) => {
     const { addresses } = args;
     let addrs = addresses;
-    if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
+    addrs = normalizeAddresses(addrs);
     const body = { addresses: addrs };
     const days = pickDays(args);
     if (days != null) body.days = toNum(days);

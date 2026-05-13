@@ -24,6 +24,27 @@ function markAds(json) {
   return json;
 }
 
+// 2026-05-13 dogfood v6 P1 #18: newsflash content 里看到大量 ((Gate.io)) / ((Binance)) 双括号
+// 包裹的品牌/交易所名字 — 这是 AiCoin 后端注入的"关键词高亮标记", agent 当 markdown 或链接
+// 语法误读。在返 list/search 时统一 _field_doc 说明 + 把双括号剥成纯文本备份到 _content_clean。
+function annotateDoubleParens(json) {
+  let list = null;
+  if (Array.isArray(json?.data)) list = json.data;
+  else if (Array.isArray(json?.data?.list)) list = json.data.list;
+  if (!Array.isArray(list)) return json;
+  let hits = 0;
+  for (const item of list) {
+    if (item && typeof item.content === 'string' && /\(\([^)]+\)\)/.test(item.content)) {
+      hits++;
+      item._content_clean = item.content.replace(/\(\(([^)]+)\)\)/g, '$1');
+    }
+  }
+  if (hits > 0) {
+    json._field_doc = `content 字段里的 \`((xxx))\` 是 AiCoin 后端注入的**关键词高亮标记** (常见: 交易所名 Gate.io / Binance / Bybit / OKX / 品牌词等), **不是 markdown 链接也不是错误格式**。展示给用户前剥掉双括号即可: \`content.replace(/\\(\\(([^)]+)\\)\\)/g, '$1')\`。SDK 已经在每条命中项里加了 _content_clean 字段 (本次 ${hits} 条命中)。`;
+  }
+  return json;
+}
+
 cli({
   // P2 #3: 接受 page_size / pagesize / size 互相 alias (newsflash 跟 news 字段名不统一, 兼容)
   search: async ({ keyword, word, page, page_size, pagesize, size } = {}) => {
@@ -31,7 +52,7 @@ cli({
     if (page) p.page = page;
     const ps = page_size || pagesize || size;
     if (ps) p.size = ps;
-    return markAds(await apiGet('/api/upgrade/v2/content/newsflash/search', p));
+    return annotateDoubleParens(markAds(await apiGet('/api/upgrade/v2/content/newsflash/search', p)));
   },
   list: async ({ last_id, page_size, pagesize, tab, only_important, language, lan, platform_show, date_mode, jump_to_date, start_date, end_date } = {}) => {
     const p = {};
@@ -47,9 +68,19 @@ cli({
     if (jump_to_date) p.jump_to_date = jump_to_date;
     if (start_date) p.start_date = start_date;
     if (end_date) p.end_date = end_date;
-    return markAds(await apiGet('/api/upgrade/v2/content/newsflash/list', p));
+    return annotateDoubleParens(markAds(await apiGet('/api/upgrade/v2/content/newsflash/list', p)));
   },
-  detail: ({ flash_id } = {}) => {
-    return apiGet('/api/upgrade/v2/content/newsflash/detail', { flash_id });
+  // 2026-05-13 dogfood v6 P1 #17: 接受 id / flashId 当 flash_id 别名 (list 里返的字段叫 id, 不叫 flash_id,
+  // agent 跨字段命名很容易传错)。 返 null 时加 _note 引导。
+  detail: async ({ flash_id, id, flashId } = {}) => {
+    const _id = flash_id || id || flashId;
+    if (!_id) {
+      return { success: false, errorCode: 400, error: 'detail 必填 flash_id (也接受 id / flashId 别名)', _note: 'id 来源: newsflash.list / newsflash.search 返回项里的 id 字段。' };
+    }
+    const json = await apiGet('/api/upgrade/v2/content/newsflash/detail', { flash_id: _id });
+    if (json && (json.data === null || json.data === undefined)) {
+      json._note = `newsflash.detail 对 flash_id="${_id}" 返 data=null。可能原因: (1) 该快讯被后端下架/隐藏 (2) flash_id 是过期/无效 ID (3) 该快讯无详情正文 (有些短快讯 list 已含全部内容, 不再有 detail)。**list 项里 content 字段通常已是完整正文**, 改用 list 数据即可, 不必再调 detail。`;
+    }
+    return json;
   },
 });

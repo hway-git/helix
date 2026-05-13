@@ -78,11 +78,32 @@ function parseRSS(xml) {
   return items;
 }
 
+// 2026-05-13 dogfood v6 P1 #18: AiCoin 后端在 content 里注入 ((xxx)) 双括号
+// 当**关键词高亮标记** (常见: 交易所名 / 品牌词), 不是 markdown 链接也不是错误格式。
+// 加 _field_doc 解释 + 每条命中项补 _content_clean (剥掉双括号的纯文本)。
+function annotateDoubleParens(json) {
+  let list = null;
+  if (Array.isArray(json?.data)) list = json.data;
+  else if (Array.isArray(json?.data?.list)) list = json.data.list;
+  if (!Array.isArray(list)) return json;
+  let hits = 0;
+  for (const item of list) {
+    if (item && typeof item.content === 'string' && /\(\([^)]+\)\)/.test(item.content)) {
+      hits++;
+      item._content_clean = item.content.replace(/\(\(([^)]+)\)\)/g, '$1');
+    }
+  }
+  if (hits > 0) {
+    json._field_doc = `content 字段里的 \`((xxx))\` 是 AiCoin 后端注入的**关键词高亮标记** (常见: 交易所名 Gate.io / Binance / Bybit / OKX / 品牌词等), **不是 markdown 链接也不是错误格式**。展示给用户前剥掉双括号即可: \`content.replace(/\\(\\(([^)]+)\\)\\)/g, '$1')\`。SDK 已经在每条命中项里加了 _content_clean 字段 (本次 ${hits} 条命中)。`;
+  }
+  return json;
+}
+
 cli({
   news_list: async ({ page, page_size, pageSize = '20' } = {}) => {
     const p = { pageSize: page_size || pageSize };
     if (page) p.page = page;
-    return markAds(await apiGet('/api/v2/content/news-list', p));
+    return annotateDoubleParens(markAds(await apiGet('/api/v2/content/news-list', p)));
   },
   news_detail: ({ id }) => apiGet('/api/v2/content/news-detail', { id }),
   // 该端点返 RSS XML, SDK 用 apiGetText 拿原文后自动 parse 一层 <item> 块。
@@ -99,13 +120,13 @@ cli({
   newsflash: async ({ language } = {}) => {
     const p = {};
     if (language) p.language = language;
-    return markAds(await apiGet('/api/v2/content/newsflash', p));
+    return annotateDoubleParens(markAds(await apiGet('/api/v2/content/newsflash', p)));
   },
   flash_list: async ({ language, createtime } = {}) => {
     const p = {};
     if (language) p.language = language;
     if (createtime) p.createtime = createtime;
-    return markAds(await apiGet('/api/v2/content/flashList', p));
+    return annotateDoubleParens(markAds(await apiGet('/api/v2/content/flashList', p)));
   },
   // exchange_listing 和 exchange_listing_flash 共享实现 (P2 #1: 显式声明 alias 关系)。
   exchange_listing: async (args) => {

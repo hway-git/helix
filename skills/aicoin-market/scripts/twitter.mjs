@@ -17,13 +17,28 @@ cli({
     if (page_size) p.page_size = page_size;
     return apiGet('/api/upgrade/v2/content/twitter/search', p);
   },
-  members: ({ keyword, word, type, page, page_size, size } = {}) => {
-    const p = { word: keyword || word };
+  // 2026-05-13 dogfood v6 P1 #20: 不传 keyword/word 时上游静默返空 list (lastId=1),
+  // agent 看到空数据困惑。本地预检 + _note 引导。
+  members: async ({ keyword, word, type, page, page_size, size } = {}) => {
+    const _kw = keyword || word;
+    if (!_kw) {
+      return {
+        success: false, errorCode: 400,
+        error: 'members 必填 keyword (也接受 word 别名)',
+        _note: 'twitter.members 是按关键字搜推特 KOL/账号。例: keyword="vitalik" 查 Vitalik / keyword="cz" 查 CZ。**不传时上游静默返空, 不是接口故障**。想看最新推文用 latest, 想搜内容用 search。',
+      };
+    }
+    const p = { word: _kw };
     if (type) p.type = type;
     if (page) p.page = page;
     const ps = page_size || size;
     if (ps) p.size = ps;
-    return apiGet('/api/upgrade/v2/content/twitter/members', p);
+    const json = await apiGet('/api/upgrade/v2/content/twitter/members', p);
+    const list = json?.data?.list;
+    if (Array.isArray(list) && list.length === 0) {
+      json._note = `twitter.members keyword="${_kw}" 返空。可能该关键字没匹配的 KOL / 账号, 换更通用的关键字试试 (例 "btc" / "eth" / 项目名)。`;
+    }
+    return json;
   },
   // 2026-05-13 P1 #3 dogfood: 加空数据 _note + 必填校验, 不让 agent 拿空当 "无数据" 误判
   interaction_stats: async ({ flash_ids } = {}) => {
