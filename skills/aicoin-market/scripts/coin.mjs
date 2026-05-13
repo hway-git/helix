@@ -121,16 +121,19 @@ cli({
   // alias: SKILL.md 早期用 ai_coins, 实际 action 名是 ai_analysis。保留兼容。
   ai_coins: aiAnalysisImpl,
   // coin_funding_rate (AiCoin API only supports BTC)
-  funding_rate: async ({ symbol, interval = '8h', weighted, limit = '100', start_time, end_time }) => {
+  // 2026-05-13 P0 #5 dogfood: 接受 interval / period / cycle 互相 alias, agent 跨 script
+  // 切换易混淆字段名。P1 _field_doc: funding_rate 是裸周期速率不是年化, agent 看到
+  // 5e-5 容易误读 "好低 0.005%"。
+  funding_rate: async ({ symbol, interval, period, cycle, weighted, limit = '100', start_time, end_time } = {}) => {
+    const _interval = interval || period || cycle || '8h';
     const resolved = resolveSymbol(symbol);
-    // Check if resolved symbol is BTC-related
     if (resolved && !resolved.toLowerCase().startsWith('btc')) {
       return {
         code: '0', msg: 'success', data: [],
         _note: `AiCoin funding_rate API only supports BTC. For ${symbol} funding rate, use: node scripts/exchange.mjs funding_rate '{"exchange":"binance","symbol":"${symbol}/USDT:USDT"}'`
       };
     }
-    const p = { symbol: resolved, interval, limit };
+    const p = { symbol: resolved, interval: _interval, limit };
     if (start_time) p.start_time = start_time;
     if (end_time) p.end_time = end_time;
     const isWeighted = weighted === 'true' || weighted === true;
@@ -138,32 +141,40 @@ cli({
       ? '/api/upgrade/v2/futures/funding-rate/vol-weight-history'
       : '/api/upgrade/v2/futures/funding-rate/history';
     const json = await apiGet(path, p);
-    // 实测: weighted=true 经常返空 list。给 agent 明确提示这是数据问题不是接口故障。
     if (isWeighted && json && Array.isArray(json.data) && json.data.length === 0) {
       json._note = '加权资金费率 (vol-weight-history) 返回为空。这通常是上游窗口数据没填或当前 Pro 档没覆盖该 endpoint, 不是接口故障也不是参数错。可改用 weighted=false 拿普通资金费率历史, 或告知用户后再决定是否继续。';
+    }
+    if (json && Array.isArray(json.data) && json.data.length > 0) {
+      const periodsPerYear = _interval === '8h' ? 3 * 365 : _interval === '1h' ? 24 * 365 : _interval === '4h' ? 6 * 365 : null;
+      json._field_doc = `open/high/low/close 是裸 ${_interval} 周期速率 (**不是年化, 不是百分比**)。${periodsPerYear ? `年化 ≈ rate × ${periodsPerYear} (该周期一年发生 ${periodsPerYear} 次)。例: 5e-5/8h ≈ 5.5%/年。` : ''} 正值 = 多头付空头 (多头情绪强), 负值反之。time 字段是毫秒 epoch。`;
     }
     return json;
   },
   // coin_liquidation
-  liquidation_map: ({ symbol, dbkey, cycle, leverage }) => {
-    const p = { dbkey: resolveDbkey(symbol || dbkey), cycle };
+  // 2026-05-13 P0 #6: cycle 加默认 '24h' + interval/period alias (subagent 反复用 interval 失败)
+  liquidation_map: ({ symbol, dbkey, cycle, interval, period, leverage } = {}) => {
+    const _cycle = cycle || interval || period || '24h';
+    const p = { dbkey: resolveDbkey(symbol || dbkey), cycle: _cycle };
     if (leverage) p.leverage = leverage;
     return apiGet('/api/upgrade/v2/futures/liquidation/map', p);
   },
-  liquidation_history: ({ symbol, interval, limit = '100', start_time, end_time }) => {
-    const p = { symbol: resolveSymbol(symbol), interval, limit };
+  liquidation_history: ({ symbol, interval, period, cycle, limit = '100', start_time, end_time } = {}) => {
+    const _interval = interval || period || cycle || '1d';
+    const p = { symbol: resolveSymbol(symbol), interval: _interval, limit };
     if (start_time) p.start_time = start_time;
     if (end_time) p.end_time = end_time;
     return apiGet('/api/upgrade/v2/futures/liquidation/history', p);
   },
-  estimated_liquidation: ({ symbol, dbkey, cycle, leverage, limit = '5', start_time, end_time }) => {
-    const p = { dbkey: resolveDbkey(symbol || dbkey), cycle, limit };
+  estimated_liquidation: ({ symbol, dbkey, cycle, interval, period, leverage, limit = '5', start_time, end_time } = {}) => {
+    const _cycle = cycle || interval || period || '24h';
+    const p = { dbkey: resolveDbkey(symbol || dbkey), cycle: _cycle, limit };
     if (leverage) p.leverage = leverage;
     if (start_time) p.start_time = start_time; if (end_time) p.end_time = end_time;
     return apiGet('/api/upgrade/v2/futures/estimated-liquidation/history', p);
   },
   // coin_open_interest
-  open_interest: async ({ symbol, interval, margin_type = 'stablecoin', limit = '100', start_time, end_time }) => {
+  open_interest: async ({ symbol, interval, period, cycle, margin_type = 'stablecoin', limit = '100', start_time, end_time } = {}) => {
+    const _interval = interval || period || cycle || '1h';
     const resolved = resolveSymbol(symbol);
     // 实测 (Q2 v2): AiCoin open_interest 跟 funding_rate 一样, 只覆盖 BTC。
     // 传 SOL/ETH/其他静默返空 list, agent 拿空 list 当"OI 为零"误判方向。
@@ -176,7 +187,7 @@ cli({
     const path = margin_type === 'coin'
       ? '/api/upgrade/v2/futures/open-interest/aggregated-coin-margin-history'
       : '/api/upgrade/v2/futures/open-interest/aggregated-stablecoin-history';
-    const p = { symbol: resolved, interval, limit };
+    const p = { symbol: resolved, interval: _interval, limit };
     if (start_time) p.start_time = start_time; if (end_time) p.end_time = end_time;
     return apiGet(path, p);
   },

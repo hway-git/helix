@@ -17,6 +17,26 @@ function requireAddress(address) {
   return null;
 }
 
+// 2026-05-13 P0 #4 dogfood: batch_pnls / batch_addr_stat / batch_max_drawdown / batch_net_flow
+// / completed_trades_by_time 全 400 "请求体无效", 根因是上游期望 period/days/pageSize 是
+// 数字类型, agent 传字符串 "7" / "30" 就 400。SDK 这边接受任意类型, 内部转 Number。
+function toNum(v) {
+  if (v == null) return v;
+  if (typeof v === 'number') return v;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : v;
+}
+
+// 2026-05-13 P0 #5 dogfood: 时间字段 alias — hl-trader 内部叫 period/days, 但 agent
+// 跨 script 切换易混淆 (hl-market 用 interval, coin 用 cycle/interval)。
+// pickPeriod / pickDays 接受 interval / cycle / period / days 互相 alias。
+function pickPeriod(args, defaultValue) {
+  return args.period ?? args.interval ?? args.cycle ?? args.timeframe ?? defaultValue;
+}
+function pickDays(args, defaultValue) {
+  return args.days ?? args.day ?? args.period ?? args.interval ?? defaultValue;
+}
+
 // HL 后端的 completed_* 端点对 "未知 positionId" 是塞到 HTTP 200 的 body
 // {code:"400", msg:"position not found"} 里返,不走 throw 分支。统一把这种
 // 业务错误包成 实测结论 提示, 引导 agent 改用替代端点。
@@ -70,19 +90,23 @@ async function hlAdvancedPaywall(path, params, name, fallback) {
 
 cli({
   // hl_trader — period 实测必填且没默认, 不传 400。这里给 "30" (30 天) 兜底。
-  trader_stats: ({ address, period }) => {
+  // P0 #5 alias: 接受 interval / cycle / timeframe 当 period alias。
+  trader_stats: (args = {}) => {
+    const { address } = args;
     const err = requireAddress(address); if (err) return Promise.resolve(err);
-    const p = { period: period || '30' };
+    const p = { period: pickPeriod(args, '30') };
     return apiGet(`/api/upgrade/v2/hl/traders/${address}/addr-stat`, p);
   },
-  best_trades: ({ address, period, limit }) => {
+  best_trades: (args = {}) => {
+    const { address, limit } = args;
     const err = requireAddress(address); if (err) return Promise.resolve(err);
-    const p = { period: period || '30' }; if (limit) p.limit = limit;
+    const p = { period: pickPeriod(args, '30') }; if (limit) p.limit = limit;
     return apiGet(`/api/upgrade/v2/hl/traders/${address}/best-trades`, p);
   },
-  performance: ({ address, period, limit }) => {
+  performance: (args = {}) => {
+    const { address, limit } = args;
     const err = requireAddress(address); if (err) return Promise.resolve(err);
-    const p = { period: period || '30' }; if (limit) p.limit = limit;
+    const p = { period: pickPeriod(args, '30') }; if (limit) p.limit = limit;
     return apiGet(`/api/upgrade/v2/hl/traders/${address}/performance-by-coin`, p);
   },
   completed_trades: async ({ address, coin, limit } = {}) => {
@@ -264,19 +288,23 @@ cli({
     }
     return apiGet(`/api/upgrade/v2/hl/portfolio/${address}/${w}`);
   },
-  pnls: ({ address, period } = {}) => {
+  // P0 #5 alias: 接受 period / interval / cycle / timeframe 互相 alias
+  pnls: (args = {}) => {
+    const { address } = args;
     const err = requireAddress(address); if (err) return Promise.resolve(err);
-    const p = { period: period || '30' };
+    const p = { period: pickPeriod(args, '30') };
     return apiGet(`/api/upgrade/v2/hl/pnls/${address}`, p);
   },
-  // max_drawdown / net_flow — days 实测必填, 默认 30
-  max_drawdown: ({ address, days, scope = 'perp' } = {}) => {
+  // max_drawdown / net_flow — days 实测必填, 默认 30. P0 #5: 接受 interval/period alias.
+  max_drawdown: (args = {}) => {
+    const { address, scope = 'perp' } = args;
     const err = requireAddress(address); if (err) return Promise.resolve(err);
-    return apiGet(`/api/upgrade/v2/hl/max-drawdown/${address}`, { days: days || '30', scope });
+    return apiGet(`/api/upgrade/v2/hl/max-drawdown/${address}`, { days: pickDays(args, '30'), scope });
   },
-  net_flow: ({ address, days } = {}) => {
+  net_flow: (args = {}) => {
+    const { address } = args;
     const err = requireAddress(address); if (err) return Promise.resolve(err);
-    return apiGet(`/api/upgrade/v2/hl/ledger-updates/net-flow/${address}`, { days: days || '30' });
+    return apiGet(`/api/upgrade/v2/hl/ledger-updates/net-flow/${address}`, { days: pickDays(args, '30') });
   },
   // hl_advanced
   // 2026-05-13 dogfood: info 当前是 raw apiPost, 传错 type ("userState") 后端 400 没列枚举。
@@ -353,27 +381,40 @@ cli({
     const p = {}; if (coin) p.coin = coin; if (limit) p.limit = limit; if (minVal) p.minVal = minVal;
     return apiGet(`/api/upgrade/v2/hl/fills/builder/${builder}/latest`, p);
   },
-  batch_pnls: ({ addresses, period, scope }) => {
+  // 2026-05-13 P0 #4 dogfood: batch_* + completed_trades_by_time 全 400 "请求体无效",
+  // 根因是上游期望 period/days/pageNum/pageSize 是**数字**类型, agent 传字符串 "7" 就 400。
+  // toNum 把字符串自动转 Number, agent 任传都通。
+  batch_pnls: (args = {}) => {
+    const { addresses, scope } = args;
     let addrs = addresses;
     if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
-    const body = { addresses: addrs }; if (period != null) body.period = period; if (scope) body.scope = scope;
+    const body = { addresses: addrs };
+    const period = pickPeriod(args);
+    if (period != null) body.period = toNum(period);
+    if (scope) body.scope = scope;
     return apiPost('/api/upgrade/v2/hl/batch-pnls', body);
   },
-  batch_addr_stat: ({ addresses, period }) => {
+  batch_addr_stat: (args = {}) => {
+    const { addresses } = args;
     let addrs = addresses;
     if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
-    const body = { addresses: addrs }; if (period != null) body.period = period;
+    const body = { addresses: addrs };
+    const period = pickPeriod(args);
+    if (period != null) body.period = toNum(period);
     return apiPost('/api/upgrade/v2/hl/traders/batch-addr-stat', body);
   },
   // 注意: 上游 body 字段是大写 Coin (不是 coin)。 agent 容易传小写, 静默拿到全币种杂烩。
   // 这里兼容两种大小写, 不让 silent wrong 发生。
+  // P0 #4: pageNum / pageSize / endTimeFrom / endTimeTo 都要数字。
   completed_trades_by_time: async ({ address, pageNum, pageSize, Coin, coin, endTimeFrom, endTimeTo } = {}) => {
     const err = requireAddress(address); if (err) return err;
     const body = {};
-    if (pageNum) body.pageNum = pageNum; if (pageSize) body.pageSize = pageSize;
+    if (pageNum != null) body.pageNum = toNum(pageNum);
+    if (pageSize != null) body.pageSize = toNum(pageSize);
     const coinValue = Coin || coin;
     if (coinValue) body.Coin = coinValue;
-    if (endTimeFrom) body.endTimeFrom = endTimeFrom; if (endTimeTo) body.endTimeTo = endTimeTo;
+    if (endTimeFrom != null) body.endTimeFrom = toNum(endTimeFrom);
+    if (endTimeTo != null) body.endTimeTo = toNum(endTimeTo);
     const json = await apiPost(`/api/upgrade/v2/hl/traders/${address}/completed-trades/by-time`, body);
     if (json && Array.isArray(json.data) && json.data.length === 0) {
       json._note = `completed_trades_by_time 时间窗 [${endTimeFrom || '?'}, ${endTimeTo || '?'}] 内该地址${coinValue ? ` ${coinValue}` : ''} 无已平仓交易。 扩大时间窗 (ms epoch), 或用 completed_trades 不限时间。`;
@@ -391,16 +432,23 @@ cli({
     if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
     return apiPost('/api/upgrade/v2/hl/traders/spot-clearinghouse-state', { addresses: addrs });
   },
-  batch_max_drawdown: ({ addresses, days, scope }) => {
+  batch_max_drawdown: (args = {}) => {
+    const { addresses, scope } = args;
     let addrs = addresses;
     if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
-    const body = { addresses: addrs }; if (days != null) body.days = days; if (scope) body.scope = scope;
+    const body = { addresses: addrs };
+    const days = pickDays(args);
+    if (days != null) body.days = toNum(days);
+    if (scope) body.scope = scope;
     return apiPost('/api/upgrade/v2/hl/batch-max-drawdown', body);
   },
-  batch_net_flow: ({ addresses, days }) => {
+  batch_net_flow: (args = {}) => {
+    const { addresses } = args;
     let addrs = addresses;
     if (typeof addrs === 'string') { try { addrs = JSON.parse(addrs); } catch { addrs = [addrs]; } }
-    const body = { addresses: addrs }; if (days != null) body.days = days;
+    const body = { addresses: addrs };
+    const days = pickDays(args);
+    if (days != null) body.days = toNum(days);
     return apiPost('/api/upgrade/v2/hl/ledger-updates/batch-net-flow', body);
   },
 });
