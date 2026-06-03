@@ -1,0 +1,19 @@
+name: Validate skills
+
+# 在 push/PR 时校验所有 skills/*/SKILL.md 的 frontmatter，
+# 防止 YAML 解析失败或 description 超 1024 的 skill 落到 main —— main 是 npx / git clone 分发的源。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # 校验脚本零依赖，无需 npm install
+      - run: node scripts/validate-skills.mjs

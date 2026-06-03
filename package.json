@@ -31,7 +31,9 @@
     ".claude-plugin/"
   ],
   "scripts": {
-    "postinstall": "echo '\\n  coinos-skills installed!\\n  Skills: aicoin-market, aicoin-account, aicoin-trading, aicoin-freqtrade, aicoin-hyperliquid\\n  Docs: https://www.aicoin.com/opendata\\n'"
+    "validate": "node scripts/validate-skills.mjs",
+    "prepublishOnly": "node scripts/validate-skills.mjs",
+    "postinstall": "echo '\\n  coinos-skills installed!\\n  Skills: aicoin-market, aicoin-account, aicoin-trading, aicoin-freqtrade, aicoin-hyperliquid, aicoin-onchain\\n  Docs: https://www.aicoin.com/opendata\\n'"
   },
   "engines": {
     "node": ">=18"
