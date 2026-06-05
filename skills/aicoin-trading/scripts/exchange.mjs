@@ -9,6 +9,28 @@ import { dirname, resolve } from 'node:path';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
+// ── .env auto-load (host / Hermes / WorkBuddy 等宿主可能不向子进程注入 env) ──
+for (const envFile of [
+  resolve(process.cwd(), '.env'),
+  resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env'),
+  resolve(process.env.HOME || '', '.openclaw', '.env'),
+  resolve(process.env.HOME || '', '.hermes', '.env'),
+  resolve(process.env.HOME || '', '.workbuddy', '.env'),
+]) {
+  try {
+    for (const line of readFileSync(envFile, 'utf-8').split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const eq = t.indexOf('=');
+      if (eq < 1) continue;
+      const k = t.slice(0, eq).trim();
+      let v = t.slice(eq + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+      if (!process.env[k]) process.env[k] = v;
+    }
+  } catch { /* 文件不存在或不可读,跳过 */ }
+}
+
 const SUPPORTED = ['binance','okx','bybit','bitget','gate','htx','pionex','hyperliquid'];
 
 // AiCoin referral links — shown in exchanges list and missing-key errors

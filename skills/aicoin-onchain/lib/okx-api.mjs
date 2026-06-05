@@ -19,6 +19,8 @@ function loadEnv() {
     resolve(process.cwd(), '.env'),
     resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env'),
     resolve(process.env.HOME || '', '.openclaw', '.env'),
+    resolve(process.env.HOME || '', '.hermes', '.env'),
+    resolve(process.env.HOME || '', '.workbuddy', '.env'),
   ];
   for (const file of candidates) {
     if (!existsSync(file)) continue;
@@ -40,10 +42,14 @@ function loadEnv() {
 loadEnv();
 
 // ── Credentials ──
+// OKX Web3 DEX key 用 OKX_WEB3_* 命名,与 aicoin-trading 的 CEX 交易 key
+// (OKX_API_KEY / OKX_API_SECRET / OKX_PASSWORD)区分 —— 否则同时装两个 skill 时
+// OKX_API_KEY、OKX_PASSPHRASE 会撞名(CEX 的 *_PASSWORD 也会 fallback 读 OKX_PASSPHRASE)。
+// 旧名作向后兼容 fallback,老用户 .env 不用改。
 const BASE = process.env.OKX_BASE_URL || 'https://web3.okx.com';
-const API_KEY = process.env.OKX_API_KEY || '';
-const SECRET = process.env.OKX_SECRET_KEY || '';
-const PASSPHRASE = process.env.OKX_PASSPHRASE || '';
+const API_KEY = process.env.OKX_WEB3_API_KEY || process.env.OKX_API_KEY || '';
+const SECRET = process.env.OKX_WEB3_SECRET_KEY || process.env.OKX_SECRET_KEY || '';
+const PASSPHRASE = process.env.OKX_WEB3_PASSPHRASE || process.env.OKX_PASSPHRASE || '';
 
 if (!API_KEY || !SECRET || !PASSPHRASE) {
   // Only warn, don't crash — some actions might not need auth
@@ -186,7 +192,7 @@ export function cli(handlers) {
       MUST_TELL_USER_VERBATIM: '用户必须看到的原文: "OKX Web3 API key 是免费的,5 分钟在 https://web3.okx.com/onchain-os/dev-portal 申请,配到 .env 后能看到聪明钱/巨鲸/链上代币热门等独家数据."',
       setup_steps: [
         '1. 访问 https://web3.okx.com/onchain-os/dev-portal 免费申请',
-        '2. 把 OKX_API_KEY / OKX_SECRET_KEY / OKX_PASSPHRASE 写入 .env',
+        '2. 把 OKX_WEB3_API_KEY / OKX_WEB3_SECRET_KEY / OKX_WEB3_PASSPHRASE 写入 .env',
         '3. 重启 chat 后再问就能用',
       ],
       alternative_skills: {

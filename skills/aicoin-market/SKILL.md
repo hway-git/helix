@@ -2,6 +2,15 @@
 name: aicoin-market
 description: "Crypto market data from AiCoin Open API v3 — 200+ exchanges, real-time. Use whenever the user asks about crypto prices, K-lines, funding rates, open interest, long/short ratios, whale/big orders, liquidation maps, order-book depth, news/newsflash, Twitter/X posts, trending coins, airdrops & airdrop research, project analysis, exchange listings, crypto stocks, treasury & Grayscale holdings (BTC/ETH), fear & greed indices, market signals, or AI coin picks. Triggers: 'BTC price', '查行情', '看价格', '大饼多少钱', 'K线', '资金费率', '多空比', '持仓量', '鲸鱼单', '大单', '清算', 'liquidation map', '深度', '快讯', '推特', '热门币', 'trending', '空投', '空投研报', '项目分析', '上了哪些交易所', 'ETF', '监管', '灰度', '国库', '上市公司持币', '恐慌贪婪指数'. ALWAYS run the script for real data — NEVER invent prices or use web_search/web_fetch/browser for crypto data. Use aicoin-hyperliquid for HL whale/trader analytics, aicoin-trading for CEX orders, aicoin-freqtrade for bots, aicoin-onchain for DEX swaps."
 metadata: { "openclaw": { "primaryEnv": "AICOIN_ACCESS_KEY_ID", "requires": { "bins": ["node"] }, "homepage": "https://www.aicoin.com/opendata", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
+required_environment_variables:
+  - name: AICOIN_ACCESS_KEY_ID
+    optional: true
+    prompt: "AiCoin Open API access key ID(可选;不填用内置免费 key,有速率限制)"
+    help: "https://www.aicoin.com/opendata"
+  - name: AICOIN_ACCESS_SECRET
+    optional: true
+    prompt: "AiCoin Open API access secret"
+    help: "https://www.aicoin.com/opendata"
 ---
 
 # AiCoin Market

@@ -2,6 +2,15 @@
 name: aicoin-freqtrade
 description: "Use when user asks about Freqtrade — strategy creation, backtest, hyperopt, switching strategies / pairs / dry-run mode, querying live bot status / balance / open positions / 盈亏. Trigger words: 'write strategy', 'create strategy', 'backtest', 'switch strategy', 'switch to live', 'open positions', 'P&L', '写策略', '创建策略', '回测', '部署策略', '切策略', '切实盘', '当前持仓', '今天赚多少', '盈亏'. In CoinClaw containers (OpenClaw / Hermes / Claude Code) freqtrade is a supervisord-managed daemon on :8080 — this skill auto-detects engine + paths via lib/coinclaw-env.mjs and never spawns competing freqtrade processes. Outside CoinClaw it falls back to host mode (clone freqtrade + nohup). For prices/charts use aicoin-market. For exchange trading use aicoin-trading. For Hyperliquid use aicoin-hyperliquid."
 metadata: { "openclaw": { "primaryEnv": "AICOIN_ACCESS_KEY_ID", "requires": { "bins": ["node"] }, "homepage": "https://www.aicoin.com/opendata", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
+required_environment_variables:
+  - name: AICOIN_ACCESS_KEY_ID
+    optional: true
+    prompt: "AiCoin Open API access key ID(策略取数;可选)"
+    help: "https://www.aicoin.com/opendata"
+  - name: AICOIN_ACCESS_SECRET
+    optional: true
+    prompt: "AiCoin Open API access secret"
+    help: "https://www.aicoin.com/opendata"
 ---
 
 # AiCoin Freqtrade

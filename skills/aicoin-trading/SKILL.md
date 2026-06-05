@@ -2,6 +2,23 @@
 name: aicoin-trading
 description: "**CEX 中心化交易所**(Binance / OKX / Bybit / Bitget 等)的下单交易工具。严格规则:(1) 所有订单必须通过 node scripts/exchange.mjs create_order 执行,禁止写自定义代码下单 (2) create_order 分两步:第一次返回预览,展示给用户等确认,用户说确认后第二次加 confirmed=true 执行 (3) 禁止自动确认,禁止跳过预览 (4) 平仓必须用 close_position,禁止用 create_order 构建平仓单。Trigger 关键词: 'buy on okx', 'sell on binance', '在 OKX 买 BTC', '在 Binance 下单', '做多 BTC 永续', '杠杆做空 ETH', '平掉我的 SOL 仓位', 'CEX 下单', '现货买入', '合约开仓', '永续平仓', '止盈止损', 'long', 'short', 'leverage', '买', '卖', '下单', '做多', '做空', '开仓', '平仓', '平掉', '关仓'. **路由提示**: 用户说“链上 swap / Uniswap / DEX 买 PEPE / Solana 上买”是**链上 DEX 交易**,应走 `aicoin-onchain` 而不是本 skill. Hyperliquid 上的下单也走 aicoin-onchain(HL 是链上 perp DEX),不是这里. 本 skill **只**处理 CEX 现货 + 永续合约下单。"
 metadata: { "openclaw": { "primaryEnv": "AICOIN_ACCESS_KEY_ID", "requires": { "bins": ["node"] }, "homepage": "https://www.aicoin.com/opendata", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
+required_environment_variables:
+  - name: OKX_API_KEY
+    optional: true
+    prompt: "OKX 交易所 API key(在 OKX 下单才需要)"
+    help: "其他交易所同理:BINANCE_API_KEY / BYBIT_API_KEY / BITGET_API_KEY 等,均配套 _API_SECRET"
+  - name: OKX_API_SECRET
+    optional: true
+    prompt: "OKX 交易所 API secret"
+  - name: OKX_PASSWORD
+    optional: true
+    prompt: "OKX API passphrase(OKX/Bitget 等需要)"
+  - name: BINANCE_API_KEY
+    optional: true
+    prompt: "Binance API key(在 Binance 下单才需要)"
+  - name: BINANCE_API_SECRET
+    optional: true
+    prompt: "Binance API secret"
 ---
 
 > **运行脚本**: 从 SKILL.md 所在目录运行 `node scripts/exchange.mjs <action>`. 三引擎(OpenClaw / Hermes / Claude Code)容器自动加载 skill, 直接 `cd` 到 skill 目录即可.

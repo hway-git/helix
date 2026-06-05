@@ -2,6 +2,15 @@
 name: aicoin-hyperliquid
 description: "Hyperliquid on-chain perpetuals analytics from AiCoin Open API v3 — the primary source for on-chain whale / smart-money / large-fund movement. Use this skill when the user asks about: Hyperliquid whale positions, HL liquidations, HL open interest, HL trader analytics, HL taker flow, HL funding history, AND generic on-chain whale activity — '链上大资金动向', '链上鲸鱼', '聪明钱', '大户在干嘛', 'on-chain whale', 'smart money', 'Hyperliquid大户', 'HL鲸鱼', 'HL持仓', 'HL清算', 'HL持仓量', 'HL交易员', 'HL 资金费率' — because HL is the deepest on-chain perp venue and AiCoin exposes its whale positions / events / liquidations / trader stats without needing any wallet key. For general crypto prices/news use aicoin-market; for DEX swaps / wallets use aicoin-onchain; for CEX trading use aicoin-trading; for Freqtrade use aicoin-freqtrade."
 metadata: { "openclaw": { "primaryEnv": "AICOIN_ACCESS_KEY_ID", "requires": { "bins": ["node"] }, "homepage": "https://www.aicoin.com/opendata", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
+required_environment_variables:
+  - name: AICOIN_ACCESS_KEY_ID
+    optional: true
+    prompt: "AiCoin Open API access key ID(可选;不填用内置免费 key,有速率限制)"
+    help: "https://www.aicoin.com/opendata"
+  - name: AICOIN_ACCESS_SECRET
+    optional: true
+    prompt: "AiCoin Open API access secret"
+    help: "https://www.aicoin.com/opendata"
 ---
 
 # AiCoin Hyperliquid

@@ -10,6 +10,8 @@ const ENV_PATHS = [
   resolve(process.cwd(), '.env'),
   resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env'),
   resolve(process.env.HOME || '', '.openclaw', '.env'),
+  resolve(process.env.HOME || '', '.hermes', '.env'),
+  resolve(process.env.HOME || '', '.workbuddy', '.env'),
 ];
 
 function findKey() {

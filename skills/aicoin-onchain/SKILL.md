@@ -1,7 +1,18 @@
 ---
 name: aicoin-onchain
 description: "Use this skill for **on-chain DEX trading and wallet operations on EVM/Solana chains**: token swap quotes, swap execution, wallet portfolio/balance queries, gas estimation, transaction broadcasting, token search/info on Ethereum/Solana/Base/BSC/Arbitrum/Polygon etc. Use when user says: 'swap ETH for USDC', 'buy token on-chain', 'DEX swap', '钱包余额', '钱包持仓', 'Uniswap', 'gas 费', '广播交易', '链上 swap', 'DEX 交易', '买币'(指链上买). Powered by OKX Web3 DEX API. MUST run node scripts. **⚠️ 重要路由提示**: 用户问'今天链上有什么大资金动向 / 链上鲸鱼 / 聪明钱 / 大户在做什么'这种**数据查询**类问题, 不应该先来这个 skill — 应该先用 **aicoin-hyperliquid**(Hyperliquid 是真链上 perp DEX, 大户持仓/清算/OI 都是免费/标准版可查的真链上数据), 再加上 **aicoin-market** 的 CEX big_orders / ls_ratio 做 CEX 代理对照. 本 skill 的 OKX Web3 接口主要服务**交易动作**(swap/钱包余额),不是数据探查; 即使 token.mjs 有 trending/hot_tokens, 也要求用户配置 OKX Web3 API Key — 而上述两个数据查询路径无需此 key. For CEX trading (Binance/OKX spot/futures), use aicoin-trading. For CEX market data (funding rates, OI, liquidation), use aicoin-market."
-metadata: { "openclaw": { "primaryEnv": "OKX_API_KEY", "requires": { "bins": ["node"] }, "homepage": "https://web3.okx.com", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
+metadata: { "openclaw": { "primaryEnv": "OKX_WEB3_API_KEY", "requires": { "bins": ["node"] }, "homepage": "https://web3.okx.com", "source": "https://github.com/aicoincom/coinos-skills", "license": "MIT" } }
+required_environment_variables:
+  - name: OKX_WEB3_API_KEY
+    optional: true
+    prompt: "OKX Web3 DEX API key(链上 swap/钱包需要)"
+    help: "https://web3.okx.com 申请。与 CEX 交易的 OKX_API_KEY 不是同一把 key;旧名 OKX_API_KEY 仍向后兼容"
+  - name: OKX_WEB3_SECRET_KEY
+    optional: true
+    prompt: "OKX Web3 API secret key"
+  - name: OKX_WEB3_PASSPHRASE
+    optional: true
+    prompt: "OKX Web3 API passphrase"
 ---
 
 > **运行脚本**: 从 SKILL.md 所在目录运行 `node scripts/<file>.mjs <action>`. 三引擎(OpenClaw / Hermes / Claude Code)容器自动加载 skill, 直接 `cd` 到 skill 目录即可.
@@ -220,9 +231,9 @@ Requires OKX Web3 API credentials. Free at [OKX Developer Portal](https://web3.o
 
 CoinClaw 用户在 web UI EnvSection 添加; 本地用户写到 `.env`:
 ```
-OKX_API_KEY=your-api-key
-OKX_SECRET_KEY=your-secret-key
-OKX_PASSPHRASE=your-passphrase
+OKX_WEB3_API_KEY=your-api-key
+OKX_WEB3_SECRET_KEY=your-secret-key
+OKX_WEB3_PASSPHRASE=your-passphrase
 ```
 
 `.env` 自动加载位置:
