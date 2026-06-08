@@ -3,7 +3,8 @@
 // Usage: node scripts/api-key-info.mjs [check]
 // When user asks about configuring/checking AiCoin API key, run this script.
 
-import { loadEnv, writeEnvPath } from '../lib/env-loader.mjs';
+import { loadEnv, writeEnvPath, envCandidates } from '../lib/env-loader.mjs';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 
@@ -14,8 +15,16 @@ loadEnv(__dir);
 
 function findKey() {
   const val = process.env.AICOIN_ACCESS_KEY_ID?.trim();
-  if (val) return { found: true, key_id: val.slice(0, 8) + '...' };
-  return { found: false };
+  if (!val) return { found: false };
+  // 找出这把 key 真正来自哪个候选文件(扫描顺序与 loadEnv 一致,首个命中即来源);
+  // 都没命中 = 来自注入的环境变量。汇报真实位置,而不是"建议写入位置"。
+  let source = null;
+  for (const f of envCandidates()) {
+    try {
+      if (readFileSync(f, 'utf-8').split('\n').some((l) => l.trim().startsWith('AICOIN_ACCESS_KEY_ID='))) { source = f; break; }
+    } catch { /* 文件不存在或不可读,跳过 */ }
+  }
+  return { found: true, key_id: val.slice(0, 8) + '...', source: source || '环境变量(已注入,非文件)' };
 }
 
 const status = findKey();
@@ -23,7 +32,7 @@ const envPath = writeEnvPath(__dir);
 
 const result = {
   aicoin_key_status: status.found
-    ? { configured: true, key_preview: status.key_id, env_file: envPath }
+    ? { configured: true, key_preview: status.key_id, env_file: status.source }
     : {
         configured: false,
         setup_steps: [
