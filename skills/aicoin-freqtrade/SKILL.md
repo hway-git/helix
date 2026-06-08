@@ -317,7 +317,7 @@ AiCoin 实时数据**不在历史区间内可用**. 回测时:
 `.env` 自动加载顺序:
 
 - coinclaw 容器内: `/workspace/.env` (Hermes/CC) 或 `/home/node/.openclaw/workspace/.env` (OpenClaw)
-- host 模式: cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env`
+- host 模式: **`~/.coinos/.env`**(coinos 文件夹, 推荐)→ 当前目录 `.env` → 旧 `~/.openclaw/.env`(向后兼容)
 
 freqtrade REST 认证: `freqtrade-api.mjs` 自动从容器内 `.ft_api_pass` 文件读密码, **agent 不用配 FREQTRADE_USERNAME / FREQTRADE_PASSWORD**. 用户也可以通过 `.env` 覆盖.
 

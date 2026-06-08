@@ -13,7 +13,7 @@
 // freqtrade CLI + freqtrade REST API 完成, 跟 dashboard 看到的状态保持一致.
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync,
-  readdirSync,
+  readdirSync, renameSync, chmodSync,
 } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -41,7 +41,7 @@ const HOST = hostModeFreqtradePaths();
 const STRAT_DIR  = ENV ? ENV.strategyPath      : HOST.strategyPath;
 const USER_DATA  = ENV ? ENV.freqtradeUserdir  : HOST.userdir;
 const CONFIG_PATH = ENV ? ENV.configPath       : HOST.configPath;
-const ENV_FILE   = ENV ? ENV.envFile           : envFileCandidates()[1];
+const ENV_FILE   = ENV ? ENV.envFile           : envFileCandidates()[0]; // host: ~/.coinos/.env(规范位置, 与读路径最高优先级一致)
 
 // FT_BIN 解析顺序:
 //   1. coinclaw 容器: 'freqtrade' — image PATH 上已经有 (entrypoint
@@ -92,8 +92,10 @@ function loadEnv() {
 loadEnv();
 
 function appendEnv(key, val) {
+  try { mkdirSync(dirname(ENV_FILE), { recursive: true }); } catch {} // ~/.coinos 可能还不存在
   if (!existsSync(ENV_FILE)) {
     writeFileSync(ENV_FILE, `${key}=${val}\n`);
+    try { chmodSync(ENV_FILE, 0o600); } catch {}
     return;
   }
   const content = readFileSync(ENV_FILE, 'utf-8');
@@ -131,10 +133,14 @@ function readDaemonConfig() {
 }
 
 function writeDaemonConfig(cfg) {
-  copyFileSync(CONFIG_PATH, `${CONFIG_PATH}.bak`);
+  const bak = `${CONFIG_PATH}.bak`;
+  copyFileSync(CONFIG_PATH, bak);
+  try { chmodSync(bak, 0o600); } catch {}
   const tmp = `${CONFIG_PATH}.tmp.${process.pid}`;
   writeFileSync(tmp, JSON.stringify(cfg, null, 4) + '\n');
-  execSync(`mv ${JSON.stringify(tmp)} ${JSON.stringify(CONFIG_PATH)}`);
+  try { chmodSync(tmp, 0o600); } catch {}
+  renameSync(tmp, CONFIG_PATH);
+  try { chmodSync(CONFIG_PATH, 0o600); } catch {}
 }
 
 function restartDaemon() {
@@ -443,6 +449,7 @@ const actions = {
     const apiPassword = randomBytes(8).toString('hex');
     const config = generateHostConfig(exchangeInfo, apiPassword, params);
     writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+    try { chmodSync(CONFIG_PATH, 0o600); } catch {} // config.json 含明文交易所 key/secret, 收紧权限
     const samplePath = resolve(STRAT_DIR, 'SampleStrategy.py');
     if (!existsSync(samplePath)) writeFileSync(samplePath, SAMPLE_STRATEGY);
     const oldPid = getHostPid();
@@ -476,7 +483,7 @@ const actions = {
       success: true, mode: 'host',
       exchange: exchangeInfo.name, strategy, dry_run: config.dry_run,
       pairs: config.exchange.pair_whitelist,
-      api_url: 'http://127.0.0.1:8080', api_password: apiPassword,
+      api_url: 'http://127.0.0.1:8080', api_auth: 'stored in .env (FREQTRADE_PASSWORD)',
       pid: getHostPid(), ready, log_file: HOST.logFile, config_path: CONFIG_PATH,
       strategies_dir: STRAT_DIR,
       note: config.dry_run ? 'Running in DRY-RUN mode' : 'WARNING: Running in LIVE mode',
@@ -830,7 +837,18 @@ if (!action || !actions[action]) {
   console.log(`Usage: node ft-deploy.mjs <action> [json-params]\nActions: ${Object.keys(actions).join(', ')}`);
   process.exit(1);
 }
-const params = rest.length ? JSON.parse(rest.join(' ')) : {};
+let params = {};
+if (rest.length) {
+  try {
+    params = JSON.parse(rest.join(' '));
+  } catch {
+    console.log(JSON.stringify({
+      error: `参数不是合法 JSON: ${rest.join(' ')}`,
+      hint: "参数要用 JSON 对象, 例: '{\"strategy\":\"MyStrat\"}'",
+    }));
+    process.exit(1);
+  }
+}
 actions[action](params).then((r) => {
   // 提示 — 只在 host 模式 / 老用法时强调走脚本; coinclaw 模式 daemon 已经
   // 在 supervisord 管, 用户从 chat agent 调用脚本就是正确路径.

@@ -5,7 +5,7 @@
 // 不要自己起进程, 用本脚本通过 :8080 REST 控制. 切策略 / 切交易对 /
 // 切实盘 / 重启 daemon 也都在这里.
 import {
-  readFileSync, writeFileSync, existsSync, copyFileSync,
+  readFileSync, writeFileSync, existsSync, copyFileSync, renameSync, chmodSync,
 } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { ftGet, ftPost, ftDelete, ftCli } from '../lib/freqtrade-api.mjs';
@@ -26,12 +26,18 @@ function readConfig() {
 function writeConfigAtomic(cfg) {
   const path = configPath();
   // 简单备份 — 改坏了 daemon autorestart 会一直 FATAL, 留一个 .bak 让 user 能 rollback.
-  copyFileSync(path, `${path}.bak`);
-  // 简单 atomic: 写到 tmp 再 rename. 跨 fs 不会有 EXDEV 因为同目录.
+  // .bak 含明文交易所 key/secret, 必须 0600 收紧权限, 别让同机其它进程读到.
+  const bak = `${path}.bak`;
+  copyFileSync(path, bak);
+  chmodSync(bak, 0o600);
+  // 简单 atomic: 写到 tmp 再原地 rename (同目录 POSIX 原子, 不跨 fs 无 EXDEV).
+  // tmp 同样含明文 key/secret, 先 0600 再 rename.
   const tmp = `${path}.tmp.${process.pid}`;
   writeFileSync(tmp, JSON.stringify(cfg, null, 4) + '\n');
-  // node 没有 fs.renameSync 跨平台问题, 直接 rename.
-  execSync(`mv ${JSON.stringify(tmp)} ${JSON.stringify(path)}`);
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, path);
+  // rename 保留 tmp 的 mode, 但最终 config 显式再收紧一次以防万一.
+  chmodSync(path, 0o600);
 }
 
 // 重启 freqtrade daemon. 优先 supervisorctl (cleanest), 退到 kill 让

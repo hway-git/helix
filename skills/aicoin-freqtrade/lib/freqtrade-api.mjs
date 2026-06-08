@@ -93,7 +93,15 @@ export function ftCli(handlers) {
     console.log(`Usage: node <script> <action> [json-params]\nActions: ${Object.keys(handlers).join(', ')}`);
     process.exit(1);
   }
-  const params = rest.length ? JSON.parse(rest.join(' ')) : {};
+  let params = {};
+  if (rest.length) {
+    try {
+      params = JSON.parse(rest.join(' '));
+    } catch {
+      console.log(JSON.stringify({ error: '参数不是合法 JSON: ' + rest.join(' '), hint: "参数要用 JSON 对象, 例: '{\"strategy\":\"MyStrat\"}'" }));
+      process.exit(1);
+    }
+  }
   handlers[action](params).then(r => console.log(JSON.stringify(r, null, 2))).catch(e => {
     console.error(e.message); process.exit(1);
   });

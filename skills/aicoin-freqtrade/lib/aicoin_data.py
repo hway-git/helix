@@ -97,7 +97,9 @@ class AiCoinData:
 
     @staticmethod
     def _load_env():
-        for f in (Path.cwd() / '.env',
+        for f in (Path('/workspace/.env'),                        # 容器(Hermes/CC entrypoint 注入)
+                  Path.home() / '.coinos' / '.env',               # 规范位置(coinos 文件夹), 与 JS loader 对齐
+                  Path.cwd() / '.env',
                   Path.home() / '.openclaw' / 'workspace' / '.env',
                   Path.home() / '.openclaw' / '.env'):
             if not f.exists():
