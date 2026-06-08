@@ -217,6 +217,95 @@ function check(dir) {
   return { dir, problems, descLen };
 }
 
+// 跨 skill 共享文件漂移门：同一逻辑文件被复制进多个 skill 时，必须字节完全相同。
+// 任一组内（存在的）多个文件内容不一致即报错并非零退出。
+const SHARED_FILE_GROUPS = [
+  {
+    name: 'group1 client.mjs',
+    files: [
+      'skills/aicoin-market/lib/client.mjs',
+      'skills/aicoin-account/lib/client.mjs',
+      'skills/aicoin-hyperliquid/lib/client.mjs',
+    ],
+  },
+  {
+    name: 'group2 env-loader.mjs',
+    files: [
+      'skills/aicoin-market/lib/env-loader.mjs',
+      'skills/aicoin-account/lib/env-loader.mjs',
+      'skills/aicoin-hyperliquid/lib/env-loader.mjs',
+      'skills/aicoin-trading/lib/env-loader.mjs',
+      'skills/aicoin-onchain/lib/env-loader.mjs',
+    ],
+  },
+  {
+    name: 'group3 exchange.mjs',
+    files: [
+      'skills/aicoin-trading/scripts/exchange.mjs',
+      'skills/aicoin-account/scripts/exchange.mjs',
+    ],
+  },
+  {
+    name: 'group4 cli.mjs',
+    files: [
+      'skills/aicoin-trading/lib/cli.mjs',
+      'skills/aicoin-account/lib/cli.mjs',
+    ],
+  },
+  {
+    name: 'group5 api-key-info.mjs',
+    files: [
+      'skills/aicoin-trading/scripts/api-key-info.mjs',
+      'skills/aicoin-account/scripts/api-key-info.mjs',
+    ],
+  },
+  {
+    name: 'group6 register.mjs',
+    files: [
+      'skills/aicoin-trading/scripts/register.mjs',
+      'skills/aicoin-account/scripts/register.mjs',
+    ],
+  },
+  {
+    name: 'group7 aicoin.mjs',
+    files: [
+      'skills/aicoin-market/scripts/aicoin.mjs',
+      'skills/aicoin-hyperliquid/scripts/aicoin.mjs',
+    ],
+  },
+];
+
+// 返回 true 表示全部组一致（或文件不足无法比对），false 表示有漂移。
+function checkSharedFileDrift() {
+  console.log('\n校验跨 skill 共享文件字节一致性');
+  console.log('-'.repeat(50));
+  let drift = false;
+  for (const group of SHARED_FILE_GROUPS) {
+    const present = group.files
+      .map((rel) => ({ rel, abs: join(ROOT, rel) }))
+      .filter(({ abs }) => existsSync(abs));
+    if (present.length < 2) {
+      // 不足两个存在的文件，无可比对，忽略。
+      console.log(`${group.name.padEnd(28)} ⏭  (仅 ${present.length} 个文件存在，跳过)`);
+      continue;
+    }
+    const ref = readFileSync(present[0].abs);
+    const mismatched = present.filter(({ abs }) => !readFileSync(abs).equals(ref));
+    if (mismatched.length === 0) {
+      console.log(`${group.name.padEnd(28)} ✅  (${present.length} 个文件一致)`);
+    } else {
+      drift = true;
+      console.log(`${group.name.padEnd(28)} ❌  drift`);
+      console.log(`${' '.repeat(2)}基准: ${present[0].rel}`);
+      for (const { rel } of mismatched) {
+        console.log(`${' '.repeat(2)}↳ 内容不一致: ${rel}`);
+      }
+    }
+  }
+  console.log('-'.repeat(50));
+  return !drift;
+}
+
 function main() {
   if (!existsSync(SKILLS_DIR)) {
     console.error(`找不到 skills 目录: ${SKILLS_DIR}`);
@@ -239,11 +328,19 @@ function main() {
     for (const p of problems) console.log(`${' '.repeat(24)}↳ ${p}`);
   }
   console.log('-'.repeat(50));
-  if (failed) {
-    console.log(`\n❌ ${failed}/${dirs.length} 个 skill 有问题，需要修复后才能发布。`);
+
+  const sharedOk = checkSharedFileDrift();
+
+  if (failed || !sharedOk) {
+    if (failed) {
+      console.log(`\n❌ ${failed}/${dirs.length} 个 skill 的 frontmatter 有问题，需要修复后才能发布。`);
+    }
+    if (!sharedOk) {
+      console.log('\n❌ 跨 skill 共享文件存在漂移，需要同步后才能发布。');
+    }
     process.exit(1);
   }
-  console.log(`\n✅ 全部 ${dirs.length} 个 skill 通过校验。`);
+  console.log(`\n✅ 全部 ${dirs.length} 个 skill 通过校验，跨 skill 共享文件字节一致。`);
 }
 
 main();

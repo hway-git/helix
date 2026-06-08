@@ -85,11 +85,11 @@ export function envFileCandidates() {
   const env = coinclawEnv();
   if (env) return [env.envFile];
   return [
+    resolve(process.env.HOME || '', '.coinos', '.env'),   // 规范位置(coinos 文件夹)
     resolve(process.cwd(), '.env'),
     resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env'),
     resolve(process.env.HOME || '', '.openclaw', '.env'),
     resolve(process.env.HOME || '', '.hermes', '.env'),
-    resolve(process.env.HOME || '', '.workbuddy', '.env'),
   ];
 }
 
