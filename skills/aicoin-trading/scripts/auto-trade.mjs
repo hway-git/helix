@@ -69,17 +69,21 @@ cli({
 
     // 1. Check balance (derive quote currency from symbol)
     const bal = ex('balance', { exchange: cfg.exchange, market_type: cfg.market_type });
+    if (bal && bal.error) throw new Error(bal.error);
     const quote = cfg.symbol.split('/')[1]?.split(':')[0] || 'USDT';
     const available = Number(bal[quote]?.free || 0);
     if (available < 1) throw new Error(`Insufficient ${quote} balance: ${available}`);
 
     // 2. Get current price
     const ticker = ex('ticker', { exchange: cfg.exchange, symbol: cfg.symbol, market_type: cfg.market_type });
+    if (ticker && ticker.error) throw new Error(ticker.error);
     const price = ticker.last || ticker.close;
+    if (!Number.isFinite(price) || price <= 0) throw new Error('invalid price from ticker');
 
     // 3. Check market minimums & get contract size
     const base = cfg.symbol.split('/')[0];
     const mkts = ex('markets', { exchange: cfg.exchange, market_type: cfg.market_type, base });
+    if (!Array.isArray(mkts)) throw new Error(mkts && mkts.error || 'markets fetch failed');
     const mkt = mkts.find(m => m.symbol === cfg.symbol);
     const contractSize = mkt?.contractSize || 1; // e.g. OKX BTC = 0.01 BTC/contract
     const amountStep = mkt?.precision?.amount || 0.01; // exchange precision step
@@ -95,6 +99,7 @@ cli({
       : amountInBase;
     // Round down to exchange precision step & enforce minimum
     const amount = Math.max(Math.floor(rawAmount / amountStep) * amountStep, amountMin);
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('computed amount invalid');
     if (amount * (contractSize || 1) * price < 1) throw new Error(`Position too small: ${amount} contracts ≈ ${(amount * contractSize).toFixed(6)} ${base}`);
 
     // 5. Set leverage
@@ -133,6 +138,7 @@ cli({
     try { ex('cancel_order', { exchange: cfg.exchange, symbol: cfg.symbol, market_type: cfg.market_type }); } catch {}
     // Get position
     const positions = ex('positions', { exchange: cfg.exchange, market_type: cfg.market_type });
+    if (!Array.isArray(positions)) throw new Error(positions && positions.error || 'positions fetch failed');
     const pos = positions.find(p => p.symbol === cfg.symbol && Math.abs(Number(p.contracts || 0)) > 0);
     if (!pos) return { closed: false, reason: 'No open position' };
 

@@ -3,46 +3,34 @@
 // Usage: node scripts/api-key-info.mjs [check]
 // When user asks about configuring/checking AiCoin API key, run this script.
 
-import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { loadEnv, writeEnvPath } from '../lib/env-loader.mjs';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 
-const ENV_PATHS = [
-  resolve(process.cwd(), '.env'),
-  resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env'),
-  resolve(process.env.HOME || '', '.openclaw', '.env'),
-  resolve(process.env.HOME || '', '.hermes', '.env'),
-  resolve(process.env.HOME || '', '.workbuddy', '.env'),
-];
+const __dir = dirname(fileURLToPath(import.meta.url));
+
+// .env auto-load (宿主可能不向子进程注入 env)。共享 loader,见 lib/env-loader.mjs。
+loadEnv(__dir);
 
 function findKey() {
-  for (const file of ENV_PATHS) {
-    if (!existsSync(file)) continue;
-    try {
-      const lines = readFileSync(file, 'utf-8').split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('AICOIN_ACCESS_KEY_ID=')) {
-          const val = trimmed.split('=')[1]?.trim().replace(/^["']|["']$/g, '');
-          if (val) return { found: true, file, key_id: val.slice(0, 8) + '...' };
-        }
-      }
-    } catch {}
-  }
+  const val = process.env.AICOIN_ACCESS_KEY_ID?.trim();
+  if (val) return { found: true, key_id: val.slice(0, 8) + '...' };
   return { found: false };
 }
 
 const status = findKey();
+const envPath = writeEnvPath(__dir);
 
 const result = {
   aicoin_key_status: status.found
-    ? { configured: true, key_preview: status.key_id, env_file: status.file }
+    ? { configured: true, key_preview: status.key_id, env_file: envPath }
     : {
         configured: false,
         setup_steps: [
           '访问 https://www.aicoin.com/opendata 注册并创建 API Key',
           '在 .env 文件中添加：AICOIN_ACCESS_KEY_ID=your-key-id',
           '在 .env 文件中添加：AICOIN_ACCESS_SECRET=your-secret',
-          '.env 文件位置：当前目录、~/.openclaw/workspace/.env 或 ~/.openclaw/.env',
+          `.env 文件位置：${envPath}（CoinClaw 容器内请在 web UI EnvSection 配置）`,
         ],
         tier_options: [
           { tier: '免费版',     price: '$0',     highlights: '价格、K线、热门币' },

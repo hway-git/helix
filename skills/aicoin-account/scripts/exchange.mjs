@@ -2,34 +2,16 @@
 // CCXT Exchange Trading CLI
 // Requires: npm install ccxt
 import { cli } from '../lib/cli.mjs';
+import { loadEnv, writeEnvPath } from '../lib/env-loader.mjs';
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync, chmodSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
-// ── .env auto-load (host / Hermes / WorkBuddy 等宿主可能不向子进程注入 env) ──
-for (const envFile of [
-  resolve(process.cwd(), '.env'),
-  resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env'),
-  resolve(process.env.HOME || '', '.openclaw', '.env'),
-  resolve(process.env.HOME || '', '.hermes', '.env'),
-  resolve(process.env.HOME || '', '.workbuddy', '.env'),
-]) {
-  try {
-    for (const line of readFileSync(envFile, 'utf-8').split('\n')) {
-      const t = line.trim();
-      if (!t || t.startsWith('#')) continue;
-      const eq = t.indexOf('=');
-      if (eq < 1) continue;
-      const k = t.slice(0, eq).trim();
-      let v = t.slice(eq + 1).trim();
-      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-      if (!process.env[k]) process.env[k] = v;
-    }
-  } catch { /* 文件不存在或不可读,跳过 */ }
-}
+// .env auto-load (宿主可能不向子进程注入 env)。共享 loader,见 lib/env-loader.mjs。
+loadEnv(__dir);
 
 const SUPPORTED = ['binance','okx','bybit','bitget','gate','htx','pionex','hyperliquid'];
 
@@ -95,7 +77,7 @@ async function getExchange(id, marketType, skipAuth = false) {
       throw new Error(
         `未配置 ${ref.name || id} 交易所 API Key。` +
         (ref.link ? `\n注册${ref.name}（AiCoin专属优惠）：${ref.link}\n邀请码：${ref.code}${ref.benefit ? '，' + ref.benefit : ''}` : '') +
-        `\n配置方法：在 .env 文件中添加 ${pre}_API_KEY=xxx 和 ${pre}_API_SECRET=xxx` +
+        `\n配置方法：把 key 放进 ~/.coinos/.env（${pre}_API_KEY=xxx / ${pre}_API_SECRET=xxx），或让 AI 用 save_key 动作代写（自动 chmod 600、不回显）。` +
         `\n${SECURITY_NOTICE}`
       );
     }
@@ -135,6 +117,30 @@ async function getExchange(id, marketType, skipAuth = false) {
   return new Ex(opts);
 }
 
+// createOrder with OKX net-mode posSide fallback
+async function placeOrder(ex, symbol, type, side, amount, price, params, exchange, marketType) {
+  const p = { ...(params || {}) };
+  const isOkxSwap = exchange === 'okx' && marketType && marketType !== 'spot';
+  if (isOkxSwap && !p.posSide) {
+    p.posSide = p.reduceOnly ? (side === 'buy' ? 'short' : 'long') : (side === 'buy' ? 'long' : 'short');
+  }
+  try {
+    return await ex.createOrder(symbol, type, side, amount, price, p);
+  } catch (e) {
+    // OKX net mode 不接受 posSide → retry 一次。但仅限 OKX swap/futures
+    // 且 error 真是 posSide 相关。早期版本看 51000 就 retry,导致 OKX
+    // race(订单已提交但响应带 51000 警告)时重复下单(dogfood 命中过 ETH
+    // spot 限价被挂两次)。spot 不可能有 posSide 问题,绝不在 spot 上 retry。
+    const errMsg = String(e);
+    const isPosSideError = isOkxSwap && p.posSide && errMsg.includes('posSide');
+    if (isPosSideError) {
+      delete p.posSide;
+      return await ex.createOrder(symbol, type, side, amount, price, p);
+    }
+    throw e;
+  }
+}
+
 cli({
   exchanges: async () => ({
     supported: SUPPORTED.map(id => {
@@ -154,6 +160,36 @@ cli({
       exchange: ref.name, invite_code: ref.code, benefit: ref.benefit || '无额外优惠', register_link: ref.link,
       steps: ['打开注册链接', '选择手机或邮箱注册', '填入验证码、设置密码', '完成身份验证(KYC)', '如需API交易，到API管理创建key，配置到.env'],
       security_notice: SECURITY_NOTICE,
+    };
+  },
+  // 本地 host 模式: 用户在 chat 里给了交易所 key 时, 把它写进规范位置 ~/.coinos/.env
+  // (chmod 600), 绝不把 secret 回显。容器内有 web UI EnvSection, 不该走这个动作。
+  save_key: async ({ exchange, api_key, api_secret, secret, password, passphrase }) => {
+    if (!exchange) throw new Error('需要 exchange，例: {"exchange":"binance","api_key":"...","api_secret":"..."}');
+    const id = exchange.toLowerCase().replace(/[.\s]/g, '');
+    const pre = id.toUpperCase();
+    const k = api_key;
+    const s = api_secret || secret;
+    const p = password || passphrase;
+    if (!k || !s) throw new Error('需要 api_key 和 api_secret(OKX/Bitget 还需 password/passphrase)');
+    const target = writeEnvPath(__dir);
+    let lines = [];
+    try { lines = readFileSync(target, 'utf-8').split('\n'); } catch { /* 文件还不存在 */ }
+    const set = (key, val) => {
+      const i = lines.findIndex(l => l.trim().startsWith(key + '='));
+      if (i >= 0) lines[i] = `${key}=${val}`; else lines.push(`${key}=${val}`);
+    };
+    set(`${pre}_API_KEY`, k);
+    set(`${pre}_API_SECRET`, s);
+    if (p) set(`${pre}_PASSWORD`, p);
+    try { mkdirSync(dirname(target), { recursive: true }); } catch {}
+    writeFileSync(target, lines.join('\n').replace(/\n*$/, '\n'));
+    try { chmodSync(target, 0o600); } catch {}
+    const written = [`${pre}_API_KEY`, `${pre}_API_SECRET`].concat(p ? [`${pre}_PASSWORD`] : []);
+    return {
+      saved: true, exchange: id, env_file: target, keys_written: written,
+      _security: 'secret 已写入并 chmod 600，未回显。注意：你刚在 chat 里发的明文 key 会留在对话记录里，在意可去交易所后台重新生成。强烈建议只勾「读取」权限、绑定 IP 白名单、不要开提现。',
+      next: `已就绪，可直接查: node scripts/exchange.mjs balance '{"exchange":"${id}"}'`,
     };
   },
   markets: async ({ exchange, market_type, base, quote, limit = 100 }) => {
@@ -240,7 +276,7 @@ cli({
     const ex = await getExchange(exchange, market_type);
     return ex.fetchOrder(order_id, symbol);
   },
-  create_order: async ({ exchange, symbol, type, side, amount, price, market_type, params, confirmed }) => {
+  create_order: async ({ exchange, symbol, type, side, amount, cost, leverage, price, market_type, params, confirmed }) => {
     const pendingFile = resolve(__dir, '..', '.pending-order.json');
 
     // Internal calls (from auto-trade.mjs) bypass file-based confirmation
@@ -251,15 +287,7 @@ cli({
       if (isInternal) {
         // Internal call: execute directly with provided params
         const ex = await getExchange(exchange, market_type);
-        const orderParams = { ...(params || {}) };
-        if (exchange === 'okx' && market_type && market_type !== 'spot' && !orderParams.posSide) {
-          if (orderParams.reduceOnly) {
-            orderParams.posSide = side === 'buy' ? 'short' : 'long';
-          } else {
-            orderParams.posSide = side === 'buy' ? 'long' : 'short';
-          }
-        }
-        const order = await ex.createOrder(symbol, type, side, amount, price, orderParams);
+        const order = await placeOrder(ex, symbol, type, side, amount, price, params, exchange, market_type);
         if (market_type && market_type !== 'spot') {
           try {
             await ex.loadMarkets();
@@ -284,19 +312,10 @@ cli({
         throw new Error('订单预览已过期（超过5分钟），请重新创建订单预览。');
       }
 
-      try { unlinkSync(pendingFile); } catch {}
-
       // Execute with stored params (prevents model from tampering between preview and confirm)
       const ex = await getExchange(pending.exchange, pending.market_type);
-      const orderParams = { ...(pending.params || {}) };
-      if (pending.exchange === 'okx' && pending.market_type && pending.market_type !== 'spot' && !orderParams.posSide) {
-        if (orderParams.reduceOnly) {
-          orderParams.posSide = pending.side === 'buy' ? 'short' : 'long';
-        } else {
-          orderParams.posSide = pending.side === 'buy' ? 'long' : 'short';
-        }
-      }
-      const order = await ex.createOrder(pending.symbol, pending.type, pending.side, pending.amount, pending.price, orderParams);
+      const order = await placeOrder(ex, pending.symbol, pending.type, pending.side, pending.amount, pending.price, pending.params, pending.exchange, pending.market_type);
+      try { unlinkSync(pendingFile); } catch {}
       if (pending.market_type && pending.market_type !== 'spot') {
         try {
           await ex.loadMarkets();
@@ -315,6 +334,53 @@ cli({
     const ex = await getExchange(exchange, market_type);
     await ex.loadMarkets();
     const mkt = ex.markets[symbol];
+
+    // Round contract amount to market precision/min (e.g. OKX BTC swap = 0.01 contract step)
+    // Avoids the old `Math.max(1, Math.round(x))` floor that broke sub-1-contract orders.
+    const roundContracts = (raw) => {
+      const minStep = mkt.precision?.amount || mkt.limits?.amount?.min || 1;
+      const minAmt = mkt.limits?.amount?.min || minStep;
+      let v = Number(raw);
+      if (!isFinite(v) || v <= 0) return minAmt;
+      // Clamp to min first so amountToPrecision doesn't throw on values < precision step
+      if (v < minAmt) v = minAmt;
+      try { v = Number(ex.amountToPrecision(symbol, v)); } catch { v = Math.round(v / minStep) * minStep; }
+      if (v < minAmt) v = minAmt;
+      return v;
+    };
+
+    // cost param: user says "用XU做多" → calculate amount from USDT margin budget
+    if (cost && mkt?.contractSize && market_type && market_type !== 'spot') {
+      const tick = await ex.fetchTicker(symbol);
+      const curP = tick.last;
+      // 杠杆来源:入参 > 已有仓位 > 交易所账户杠杆配置(fetchLeverage)。
+      // 都拿不到时**不要静默假设 1x** —— 按 1x 算出的张数会与实际杠杆差数量级(AGENTS.md 铁则二)。
+      let lev = leverage ? Number(leverage) : null;
+      if (!lev) {
+        try {
+          const positions = await ex.fetchPositions([symbol]);
+          const pos = positions.find(p => p.symbol === symbol);
+          if (pos?.leverage) lev = Number(pos.leverage);
+        } catch {}
+      }
+      if (!lev && ex.has?.fetchLeverage) {
+        try {
+          const lv = await ex.fetchLeverage(symbol);
+          const n = Number(lv?.longLeverage ?? lv?.leverage ?? lv?.info?.lever ?? lv?.shortLeverage);
+          if (n > 0) lev = n;
+        } catch {}
+      }
+      if (!(lev > 0)) {
+        throw new Error(`无法确定 ${symbol} 的杠杆倍数(当前无持仓、交易所也未返回杠杆配置)。请显式传 leverage,例如 {"cost":${cost},"leverage":10,...},避免按 1x 误算张数。`);
+      }
+      amount = roundContracts(Number(cost) * lev / (mkt.contractSize * curP));
+    }
+
+    // Auto-convert: non-integer amount on contract = user gave base currency (e.g. 0.01 BTC → 1 contract)
+    if (!cost && mkt?.contractSize && !Number.isInteger(Number(amount))) {
+      amount = roundContracts(Number(amount) / mkt.contractSize);
+    }
+
     const pendingOrder = { exchange, symbol, type, side, amount, price, market_type, params, timestamp: Date.now() };
     writeFileSync(pendingFile, JSON.stringify(pendingOrder));
 
@@ -347,19 +413,24 @@ cli({
 
     // Leverage & margin info for futures
     if (mktType !== 'spot') {
+      let lev = leverage ? Number(leverage) : null;
+      let mgnMode = null;
       try {
         const positions = await ex.fetchPositions([symbol]);
         const pos = positions.find(p => p.symbol === symbol);
         if (pos) {
-          if (pos.leverage) orderInfo['杠杆'] = `${pos.leverage}x`;
-          if (pos.marginMode || pos.marginType) orderInfo['保证金模式'] = pos.marginMode || pos.marginType;
-          if (curPrice && pos.leverage) {
-            const lev = Number(pos.leverage);
-            const notional = mkt?.contractSize ? amount * mkt.contractSize * curPrice : amount * curPrice;
-            orderInfo['预估保证金'] = `${(notional / lev).toFixed(2)} USDT`;
-          }
+          if (!lev && pos.leverage) lev = Number(pos.leverage);
+          mgnMode = pos.marginMode || pos.marginType;
         }
       } catch {}
+      if (lev) {
+        orderInfo['杠杆'] = `${lev}x`;
+        if (curPrice) {
+          const notional = mkt?.contractSize ? amount * mkt.contractSize * curPrice : amount * curPrice;
+          orderInfo['预估保证金'] = `${(notional / lev).toFixed(2)} USDT`;
+        }
+      }
+      if (mgnMode) orderInfo['保证金模式'] = mgnMode;
     }
 
     return {
@@ -370,6 +441,39 @@ cli({
       订单详情: orderInfo,
       操作指引: '请确认以上订单信息无误。回复「确认」或「yes」执行下单，回复「取消」放弃。',
     };
+  },
+  close_position: async ({ exchange, symbol, market_type, confirmed }) => {
+    const mt = market_type || 'swap';
+    const ex = await getExchange(exchange, mt);
+    const positions = await ex.fetchPositions(symbol ? [symbol] : undefined);
+    const open = positions.filter(p => Math.abs(Number(p.contracts || 0)) > 0);
+    if (!open.length) return { message: '当前没有持仓需要平仓。', positions: [] };
+    // Preview
+    if (confirmed !== 'true' && confirmed !== true) {
+      return {
+        _preview: true,
+        status: '⚠️ 平仓预览 — 订单未下达',
+        待平仓位: open.map(p => ({
+          交易对: p.symbol, 方向: p.side === 'long' ? '多' : '空',
+          张数: Math.abs(Number(p.contracts)), 开仓价: p.entryPrice,
+          未实现盈亏: p.unrealizedPnl, 杠杆: p.leverage,
+        })),
+        操作指引: '请确认平掉以上仓位。回复「确认」执行，回复「取消」放弃。',
+      };
+    }
+    // Execute
+    const results = [];
+    for (const pos of open) {
+      const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+      const amount = Math.abs(Number(pos.contracts));
+      try {
+        const order = await placeOrder(ex, pos.symbol, 'market', closeSide, amount, undefined, { reduceOnly: true }, exchange, mt);
+        results.push({ symbol: pos.symbol, side: pos.side, amount, status: '已平仓', orderId: order.id });
+      } catch (e) {
+        results.push({ symbol: pos.symbol, side: pos.side, amount, status: '失败', error: e.message });
+      }
+    }
+    return { 平仓结果: results };
   },
   funding_rate: async ({ exchange, symbol, market_type }) => {
     const ex = await getExchange(exchange, market_type || 'swap', true);

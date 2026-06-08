@@ -2,34 +2,16 @@
 // CCXT Exchange Trading CLI
 // Requires: npm install ccxt
 import { cli } from '../lib/cli.mjs';
+import { loadEnv, writeEnvPath } from '../lib/env-loader.mjs';
 import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync, chmodSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
-// ── .env auto-load (host / Hermes / WorkBuddy 等宿主可能不向子进程注入 env) ──
-for (const envFile of [
-  resolve(process.cwd(), '.env'),
-  resolve(process.env.HOME || '', '.openclaw', 'workspace', '.env'),
-  resolve(process.env.HOME || '', '.openclaw', '.env'),
-  resolve(process.env.HOME || '', '.hermes', '.env'),
-  resolve(process.env.HOME || '', '.workbuddy', '.env'),
-]) {
-  try {
-    for (const line of readFileSync(envFile, 'utf-8').split('\n')) {
-      const t = line.trim();
-      if (!t || t.startsWith('#')) continue;
-      const eq = t.indexOf('=');
-      if (eq < 1) continue;
-      const k = t.slice(0, eq).trim();
-      let v = t.slice(eq + 1).trim();
-      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-      if (!process.env[k]) process.env[k] = v;
-    }
-  } catch { /* 文件不存在或不可读,跳过 */ }
-}
+// .env auto-load (宿主可能不向子进程注入 env)。共享 loader,见 lib/env-loader.mjs。
+loadEnv(__dir);
 
 const SUPPORTED = ['binance','okx','bybit','bitget','gate','htx','pionex','hyperliquid'];
 
@@ -95,7 +77,7 @@ async function getExchange(id, marketType, skipAuth = false) {
       throw new Error(
         `未配置 ${ref.name || id} 交易所 API Key。` +
         (ref.link ? `\n注册${ref.name}（AiCoin专属优惠）：${ref.link}\n邀请码：${ref.code}${ref.benefit ? '，' + ref.benefit : ''}` : '') +
-        `\n配置方法：在 .env 文件中添加 ${pre}_API_KEY=xxx 和 ${pre}_API_SECRET=xxx` +
+        `\n配置方法：把 key 放进 ~/.coinos/.env（${pre}_API_KEY=xxx / ${pre}_API_SECRET=xxx），或让 AI 用 save_key 动作代写（自动 chmod 600、不回显）。` +
         `\n${SECURITY_NOTICE}`
       );
     }
@@ -178,6 +160,36 @@ cli({
       exchange: ref.name, invite_code: ref.code, benefit: ref.benefit || '无额外优惠', register_link: ref.link,
       steps: ['打开注册链接', '选择手机或邮箱注册', '填入验证码、设置密码', '完成身份验证(KYC)', '如需API交易，到API管理创建key，配置到.env'],
       security_notice: SECURITY_NOTICE,
+    };
+  },
+  // 本地 host 模式: 用户在 chat 里给了交易所 key 时, 把它写进规范位置 ~/.coinos/.env
+  // (chmod 600), 绝不把 secret 回显。容器内有 web UI EnvSection, 不该走这个动作。
+  save_key: async ({ exchange, api_key, api_secret, secret, password, passphrase }) => {
+    if (!exchange) throw new Error('需要 exchange，例: {"exchange":"binance","api_key":"...","api_secret":"..."}');
+    const id = exchange.toLowerCase().replace(/[.\s]/g, '');
+    const pre = id.toUpperCase();
+    const k = api_key;
+    const s = api_secret || secret;
+    const p = password || passphrase;
+    if (!k || !s) throw new Error('需要 api_key 和 api_secret(OKX/Bitget 还需 password/passphrase)');
+    const target = writeEnvPath(__dir);
+    let lines = [];
+    try { lines = readFileSync(target, 'utf-8').split('\n'); } catch { /* 文件还不存在 */ }
+    const set = (key, val) => {
+      const i = lines.findIndex(l => l.trim().startsWith(key + '='));
+      if (i >= 0) lines[i] = `${key}=${val}`; else lines.push(`${key}=${val}`);
+    };
+    set(`${pre}_API_KEY`, k);
+    set(`${pre}_API_SECRET`, s);
+    if (p) set(`${pre}_PASSWORD`, p);
+    try { mkdirSync(dirname(target), { recursive: true }); } catch {}
+    writeFileSync(target, lines.join('\n').replace(/\n*$/, '\n'));
+    try { chmodSync(target, 0o600); } catch {}
+    const written = [`${pre}_API_KEY`, `${pre}_API_SECRET`].concat(p ? [`${pre}_PASSWORD`] : []);
+    return {
+      saved: true, exchange: id, env_file: target, keys_written: written,
+      _security: 'secret 已写入并 chmod 600，未回显。注意：你刚在 chat 里发的明文 key 会留在对话记录里，在意可去交易所后台重新生成。强烈建议只勾「读取」权限、绑定 IP 白名单、不要开提现。',
+      next: `已就绪，可直接查: node scripts/exchange.mjs balance '{"exchange":"${id}"}'`,
     };
   },
   markets: async ({ exchange, market_type, base, quote, limit = 100 }) => {
@@ -341,14 +353,25 @@ cli({
     if (cost && mkt?.contractSize && market_type && market_type !== 'spot') {
       const tick = await ex.fetchTicker(symbol);
       const curP = tick.last;
-      // Use leverage from param, or fetch from position
-      let lev = leverage ? Number(leverage) : 1;
-      if (!leverage) {
+      // 杠杆来源:入参 > 已有仓位 > 交易所账户杠杆配置(fetchLeverage)。
+      // 都拿不到时**不要静默假设 1x** —— 按 1x 算出的张数会与实际杠杆差数量级(AGENTS.md 铁则二)。
+      let lev = leverage ? Number(leverage) : null;
+      if (!lev) {
         try {
           const positions = await ex.fetchPositions([symbol]);
           const pos = positions.find(p => p.symbol === symbol);
           if (pos?.leverage) lev = Number(pos.leverage);
         } catch {}
+      }
+      if (!lev && ex.has?.fetchLeverage) {
+        try {
+          const lv = await ex.fetchLeverage(symbol);
+          const n = Number(lv?.longLeverage ?? lv?.leverage ?? lv?.info?.lever ?? lv?.shortLeverage);
+          if (n > 0) lev = n;
+        } catch {}
+      }
+      if (!(lev > 0)) {
+        throw new Error(`无法确定 ${symbol} 的杠杆倍数(当前无持仓、交易所也未返回杠杆配置)。请显式传 leverage,例如 {"cost":${cost},"leverage":10,...},避免按 1x 误算张数。`);
       }
       amount = roundContracts(Number(cost) * lev / (mkt.contractSize * curP));
     }

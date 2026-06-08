@@ -89,6 +89,7 @@ node scripts/exchange.mjs positions '{"exchange":"okx","market_type":"swap"}'
 |------|------|
 | 平仓（全部或指定） | `node scripts/exchange.mjs close_position '{"exchange":"okx","market_type":"swap"}'` — 加 `"symbol":"BTC/USDT:USDT"` 只平单个 |
 | 取消订单 | `node scripts/exchange.mjs cancel_order '{"exchange":"okx","symbol":"BTC/USDT","order_id":"xxx"}'` |
+| 存交易所 key（本地，用户在 chat 给了 key 时） | `node scripts/exchange.mjs save_key '{"exchange":"binance","api_key":"...","api_secret":"..."}'` — 写进 `~/.coinos/.env`、`chmod 600`、不回显 secret（OKX/Bitget 还要 `"password":"..."`）。容器内引导用户去 web UI EnvSection，别在 chat 收 key |
 
 ## 数量
 

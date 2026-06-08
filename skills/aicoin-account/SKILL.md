@@ -77,7 +77,7 @@ When user wants to upgrade AiCoin data tier:
 
 ## Setup
 
-交易所 API key 写到 `.env` 自动加载. **CoinClaw 容器里**直接在 web UI EnvSection 配置, 写入 `/workspace/.env` (Hermes/CC) 或 `/home/node/.openclaw/workspace/.env` (OpenClaw). **本地 host 模式**自动从 cwd → `~/.openclaw/workspace/.env` → `~/.openclaw/.env` 加载.
+交易所 API key 写到 `.env` 自动加载. **CoinClaw 容器里**直接在 web UI EnvSection 配置(写入 `/workspace/.env`). **本地 host 模式**统一放 **`~/.coinos/.env`**(coinos 文件夹, 推荐 —— 不管从哪个目录跑脚本都能读到), 也认当前目录 `.env` 和旧的 `~/.openclaw/.env`(向后兼容).
 
 ```
 BINANCE_API_KEY=xxx
