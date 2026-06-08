@@ -78,13 +78,13 @@ node scripts/aicoin.mjs market/ticker '{"coin_key":"bitcoin","market":"binance"}
 2. **加密数据只用这个脚本**，不要用 `web_search` / `web_fetch` / `curl` / 浏览器去拼。
 3. **`coin_key` 还是 `coin`？** 普通接口用 `coin_key` —— AiCoin 币种 slug，小写（`bitcoin`、`ethereum`）；`hyperliquid/*` 接口用 `coin` —— 交易符号（`BTC`、`HYPE`）。每个参数照 `catalog` 里的 `desc` / `example` 填。
 4. **详情接口的 id 先从列表接口拿**：快讯/文章详情先 `content/newsflashes`、`content/articles` 取 id；空投/项目详情先 `airdrops`、`drop-radar/projects` 取 `project_id`。
-5. **`ok:false` + HTTP 403** = 当前套餐不覆盖这个接口，**别重试**，告诉用户去 https://www.aicoin.com/opendata 升级。`200` + 空 `data` 是"此条件下没数据"，**不是出错**。
+5. **`ok:false` + HTTP 403** = 当前 key 无此接口权限，**别重试**。先别断言"套餐不够"：本地 host 常见坑是脚本 fallback 到了免费/旧 key —— 先 `node scripts/aicoin.mjs key` 看 key_id 是不是用户的专业版(key 应在 `~/.coinos/.env`)。确属套餐不足，再告诉用户去 https://www.aicoin.com/opendata 升级。`200` + 空 `data` 是"此条件下没数据"，**不是出错**。
 6. **时间用 Unix 毫秒**（`start_time` / `end_time`），分页用 `limit` / `offset`。
 7. 用**用户的语言**回复（中文提问就全程中文）。
 
 ## API Key
 
-内置一个免费 key，开箱即用，够查行情、K 线、币种、新闻这些。资金费率、大单、清算、HL 鲸鱼、国库等需要付费套餐 —— 某接口返回 403 就是套餐不够。
+内置一个免费 key，开箱即用，够查行情、K 线、币种、新闻这些。资金费率、大单、清算、HL 鲸鱼、国库等需要付费套餐。**收到 403 先 `node scripts/aicoin.mjs key` 核对 key_id 是不是用户的专业版(key 应放 `~/.coinos/.env`),确认没加载错 key 再判断是否真套餐不够** —— 把"key 没加载对"误报成"接口要付费"会让付费用户暴怒。
 
 用自己的 key —— 推荐 `set-key` 命令（会先验证再写入 `.env`，**禁止手编 .env**）：
 

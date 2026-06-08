@@ -8,7 +8,7 @@
 //
 // Endpoint = the path after /api/v3/ , e.g.  market/ticker  ,  hyperliquid/whales/open-positions
 // Every call prints the v3 envelope {ok, data, error, meta}. Check `ok` first.
-import { request, resolveMethod, fetchCatalog, saveKey, KEY, USING_OWN_KEY } from '../lib/client.mjs';
+import { request, resolveMethod, fetchCatalog, saveKey, summarizeTimeseries, KEY, USING_OWN_KEY } from '../lib/client.mjs';
 
 const out = (o) => console.log(JSON.stringify(o, null, 2));
 const groupOf = (p) => p.replace(/^\/api\/v3\//, '').split('/')[0] || '_catalog';
@@ -16,7 +16,7 @@ const rel = (p) => p.replace(/^\/api\/v3\//, '');
 
 const HINTS = {
   401: 'HTTP 401 — 签名或鉴权失败，检查 API key 是否正确。',
-  403: 'HTTP 403 — 当前 key 没有此接口权限（套餐不够或 key 无效）。不要重试；告诉用户去 https://www.aicoin.com/opendata 升级套餐。',
+  403: 'HTTP 403 — 此接口当前 key 无权限。**先别断言「套餐不够」**：本地 host 最常见的坑是脚本 fallback 到了免费/旧 key —— 跑 `node scripts/aicoin.mjs key` 看 key_id 是不是你的专业版（key 应放 ~/.coinos/.env）。确属套餐不足，再让用户去 https://www.aicoin.com/opendata 升级。不要重试。',
   404: 'HTTP 404 — 资源不存在，检查 id / 参数是否对。',
   429: 'HTTP 429 — 触发限流，等 30-60 秒再试，或把多个查询合并成一次。',
   500: 'HTTP 500 — 服务端/上游故障，可隔 1-2 分钟重试；持续失败请联系 service@aicoin.com。',
@@ -41,6 +41,17 @@ async function callEndpoint(endpoint, rawParams) {
   catch (e) { return out({ ok: false, error: { code: 'network', message: e.message }, _hint: '网络/超时错误，稍后重试。' }); }
   const body = (res.body && typeof res.body === 'object') ? res.body : { raw: res.body };
   if (res.httpStatus !== 200 && HINTS[res.httpStatus]) body._hint = HINTS[res.httpStatus];
+  // 时序数组: 附一个 order-independent 的 latest, 防 agent 用 tail/arr[0] 猜错方向。
+  if (body && body.ok) {
+    let series = Array.isArray(body.data) ? body.data : null;
+    let where = 'data';
+    if (!series && body.data && typeof body.data === 'object') {
+      for (const k of ['list', 'items', 'records', 'rows', 'data']) {
+        if (Array.isArray(body.data[k])) { series = body.data[k]; where = `data.${k}`; break; }
+      }
+    }
+    if (series) { const ts = summarizeTimeseries(series); if (ts) body._timeseries = { in: where, ...ts }; }
+  }
   out(body);
 }
 

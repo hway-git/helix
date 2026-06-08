@@ -75,17 +75,18 @@ node scripts/aicoin.mjs hyperliquid/whales/open-positions '{"coin":"BTC"}'
 6. **`positions/completed/*`** 的 `start_time` / `end_time` 必须**精确等于** `traders/completed-trades` 里某个仓位的开/平仓毫秒戳，不接受任意时间范围。
 7. **批量接口**（`*/batch`、`traders/accounts/statistics` 等）地址数超上限会**静默截断**。
 8. `raw/*` 是 HL 官方 Info API 的只读 GET 封装，要账户原始数据优先用 `raw/*`，别用 POST `hyperliquid/info`。
+9. **时序接口取最新值用返回里的 `_timeseries.latest`,别靠数组位置猜**。`whales/history-long-ratio`、`open-interest/history`、`liquidations/history` 等历史数组**顺序不保证**(很多倒序、最新在 `arr[0]`)。脚本已自动在返回里附 `_timeseries`(`latest` = 时间戳最大那条,与数组顺序无关;还有 `oldest` / `order` / `field`)—— **取"当前/最新"直接读 `_timeseries.latest`**,做"边际加仓/减仓、趋势"用 `latest` vs `oldest`。**绝不要 `tail` / 默认数组末尾或开头**(曾把 2 天前的 `position_value_diff` 当最新、误判"大户边际加空")。单笔事件(`latest-events` 里某笔大单)≠ 大户整体方向,判断整体优先用 `directions`(当前快照)/ `open-interest/summary` 对照。
 
 ## 几条要记住的
 
 1. **不编数据。** 永远跑脚本拿真实数据。`data` 为空 / `ok:false` 就如实说，不要编。
-2. **`ok:false` + HTTP 403** = 当前套餐不覆盖这个接口，**别重试**，引导用户去 https://www.aicoin.com/opendata 升级。`200` + 空 `data`（比如某地址当前无持仓）是正常的"没数据"，不是出错。
+2. **`ok:false` + HTTP 403** = 当前 key 无此接口权限，**别重试**。先别断言"套餐不够"：本地 host 常见坑是脚本 fallback 到了免费/旧 key —— 先跑 `node scripts/aicoin.mjs key` 看 key_id 是不是用户的专业版(key 应在 `~/.coinos/.env`)。确属套餐不足，再引导用户去 https://www.aicoin.com/opendata 升级。`200` + 空 `data`（比如某地址当前无持仓）是正常的"没数据"，不是出错。
 3. 时间用 Unix 毫秒（`start_time` / `end_time`）。
 4. 用**用户的语言**回复。
 
 ## API Key
 
-内置一个免费 key 可查行情。鲸鱼持仓、清算、交易员分析等需要付费套餐 —— 接口返回 403 就是套餐不够。
+内置一个免费 key 可查行情。鲸鱼持仓、清算、交易员分析等需要付费套餐。**收到 403 先 `node scripts/aicoin.mjs key` 核对 key_id 是不是用户的专业版(key 应放 `~/.coinos/.env`),确认 key 没加载错再判断是否真的套餐不够** —— 把"key 没加载对"误报成"接口要付费"会让付费用户暴怒。
 
 用自己的 key:
 - `node scripts/aicoin.mjs set-key <id> <secret>`
