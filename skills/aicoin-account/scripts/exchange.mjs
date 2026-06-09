@@ -67,20 +67,35 @@ async function getExchange(id, marketType, skipAuth = false) {
   }
   const opts = {};
   if (!skipAuth) {
-    const pre = id.toUpperCase();
-    opts.apiKey = process.env[`${pre}_API_KEY`];
-    opts.secret = process.env[`${pre}_API_SECRET`] || process.env[`${pre}_SECRET`];
-    if (process.env[`${pre}_PASSWORD`] || process.env[`${pre}_PASSPHRASE`]) {
-      opts.password = process.env[`${pre}_PASSWORD`] || process.env[`${pre}_PASSPHRASE`];
-    }
-    if (!opts.apiKey) {
-      const ref = REFERRALS[id] || {};
-      throw new Error(
-        `未配置 ${ref.name || id} 交易所 API Key。` +
-        (ref.link ? `\n注册${ref.name}（AiCoin专属优惠）：${ref.link}\n邀请码：${ref.code}${ref.benefit ? '，' + ref.benefit : ''}` : '') +
-        `\n配置方法：把 key 放进 ~/.coinos/.env（${pre}_API_KEY=xxx / ${pre}_API_SECRET=xxx），或让 AI 用 save_key 动作代写（自动 chmod 600、不回显）。` +
-        `\n${SECURITY_NOTICE}`
-      );
+    if (id === 'hyperliquid') {
+      // HL 用钱包签名,不是 api_key/secret: walletAddress=主钱包(查余额/持仓), privateKey=API钱包(agent)私钥(签单)。
+      opts.walletAddress = process.env.HYPERLIQUID_WALLET_ADDRESS || process.env.HYPERLIQUID_MAIN_WALLET || '';
+      opts.privateKey = process.env.HYPERLIQUID_PRIVATE_KEY || '';
+      if (!opts.walletAddress || !opts.privateKey) {
+        const ref = REFERRALS.hyperliquid || {};
+        throw new Error(
+          `未配置 Hyperliquid 钱包凭证。HL 用钱包签名(非 api key):需要主钱包地址 + API 钱包私钥。` +
+          (ref.link ? `\n注册 HL(AiCoin 返佣):${ref.link} 邀请码 ${ref.code}` : '') +
+          `\n配置:让 AI 用 save_key({"exchange":"hyperliquid","wallet_address":"0x主钱包","private_key":"0xAPI钱包私钥"}),写进 ~/.coinos/.env、chmod 600、不回显。` +
+          `\n⚠️ 务必用 HL「API 钱包/agent wallet」私钥(可在 HL 后台单独授权与撤销),绝不要用主钱包私钥。\n${SECURITY_NOTICE}`
+        );
+      }
+    } else {
+      const pre = id.toUpperCase();
+      opts.apiKey = process.env[`${pre}_API_KEY`];
+      opts.secret = process.env[`${pre}_API_SECRET`] || process.env[`${pre}_SECRET`];
+      if (process.env[`${pre}_PASSWORD`] || process.env[`${pre}_PASSPHRASE`]) {
+        opts.password = process.env[`${pre}_PASSWORD`] || process.env[`${pre}_PASSPHRASE`];
+      }
+      if (!opts.apiKey) {
+        const ref = REFERRALS[id] || {};
+        throw new Error(
+          `未配置 ${ref.name || id} 交易所 API Key。` +
+          (ref.link ? `\n注册${ref.name}（AiCoin专属优惠）：${ref.link}\n邀请码：${ref.code}${ref.benefit ? '，' + ref.benefit : ''}` : '') +
+          `\n配置方法：把 key 放进 ~/.coinos/.env（${pre}_API_KEY=xxx / ${pre}_API_SECRET=xxx），或让 AI 用 save_key 动作代写（自动 chmod 600、不回显）。` +
+          `\n${SECURITY_NOTICE}`
+        );
+      }
     }
   }
   // Proxy support: PROXY_URL (MCP-compatible) or HTTPS_PROXY/HTTP_PROXY
@@ -292,14 +307,10 @@ cli({
   },
   // 本地 host 模式: 用户在 chat 里给了交易所 key 时, 把它写进规范位置 ~/.coinos/.env
   // (chmod 600), 绝不把 secret 回显。容器内有 web UI EnvSection, 不该走这个动作。
-  save_key: async ({ exchange, api_key, api_secret, secret, password, passphrase }) => {
+  save_key: async ({ exchange, api_key, api_secret, secret, password, passphrase, wallet_address, private_key }) => {
     if (!exchange) throw new Error('需要 exchange，例: {"exchange":"binance","api_key":"...","api_secret":"..."}');
     const id = exchange.toLowerCase().replace(/[.\s]/g, '');
     const pre = id.toUpperCase();
-    const k = api_key;
-    const s = api_secret || secret;
-    const p = password || passphrase;
-    if (!k || !s) throw new Error('需要 api_key 和 api_secret(OKX/Bitget 还需 password/passphrase)');
     const target = writeEnvPath();
     let lines = [];
     try { lines = readFileSync(target, 'utf-8').split('\n'); } catch { /* 文件还不存在 */ }
@@ -307,12 +318,35 @@ cli({
       const i = lines.findIndex(l => l.trim().startsWith(key + '='));
       if (i >= 0) lines[i] = `${key}=${val}`; else lines.push(`${key}=${val}`);
     };
+    const flush = () => {
+      try { mkdirSync(dirname(target), { recursive: true }); } catch {}
+      writeFileSync(target, lines.join('\n').replace(/\n*$/, '\n'));
+      try { chmodSync(target, 0o600); } catch {}
+    };
+
+    // Hyperliquid: 钱包签名模式(非 api key)。wallet_address=主钱包, private_key=API钱包(agent)私钥。
+    if (id === 'hyperliquid') {
+      const w = wallet_address || api_key;          // 容错: 误用 api_key 传地址
+      const pk = private_key || api_secret || secret; // 容错: 误用 api_secret 传私钥
+      if (!w || !pk) throw new Error('Hyperliquid 需要 wallet_address(主钱包地址) 和 private_key(API钱包/agent 私钥)');
+      set('HYPERLIQUID_WALLET_ADDRESS', w);
+      set('HYPERLIQUID_PRIVATE_KEY', pk);
+      flush();
+      return {
+        saved: true, exchange: id, env_file: target, keys_written: ['HYPERLIQUID_WALLET_ADDRESS', 'HYPERLIQUID_PRIVATE_KEY'],
+        _security: '私钥已写入并 chmod 600,未回显。⚠️ HL 私钥能签所有交易 —— 务必用 HL「API 钱包/agent wallet」私钥(可在 HL 后台单独授权与随时撤销),绝不要用主钱包私钥;明文已留在本次对话记录里,在意就去 HL 重新授权一个 agent。',
+        next: `已就绪,可直接查: node scripts/exchange.mjs balance '{"exchange":"hyperliquid"}'`,
+      };
+    }
+
+    const k = api_key;
+    const s = api_secret || secret;
+    const p = password || passphrase;
+    if (!k || !s) throw new Error('需要 api_key 和 api_secret(OKX/Bitget 还需 password/passphrase;Hyperliquid 用 wallet_address + private_key)');
     set(`${pre}_API_KEY`, k);
     set(`${pre}_API_SECRET`, s);
     if (p) set(`${pre}_PASSWORD`, p);
-    try { mkdirSync(dirname(target), { recursive: true }); } catch {}
-    writeFileSync(target, lines.join('\n').replace(/\n*$/, '\n'));
-    try { chmodSync(target, 0o600); } catch {}
+    flush();
     const written = [`${pre}_API_KEY`, `${pre}_API_SECRET`].concat(p ? [`${pre}_PASSWORD`] : []);
     return {
       saved: true, exchange: id, env_file: target, keys_written: written,
