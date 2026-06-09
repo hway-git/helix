@@ -117,10 +117,11 @@ async function getExchange(id, marketType, skipAuth = false) {
   return new Ex(opts);
 }
 
-// createOrder with OKX net-mode posSide fallback
+// createOrder with OKX net-mode posSide fallback + Binance hedge-mode positionSide fallback
 async function placeOrder(ex, symbol, type, side, amount, price, params, exchange, marketType) {
   const p = { ...(params || {}) };
   const isOkxSwap = exchange === 'okx' && marketType && marketType !== 'spot';
+  const isBinanceSwap = exchange === 'binance' && marketType && marketType !== 'spot';
   // 仅给"开/加仓"单(非 reduceOnly)自动补 posSide。平仓/止损这类 reduceOnly 单:OKX 双向已由
   // closeParamsFor 显式塞好 posSide;OKX 单向(net)根本不该带 posSide —— 早先无条件猜一个 posSide
   // 会让 net 模式平仓单"先必失败再 retry",而 retry 每次重算 clOrdId 无幂等键,对 algo 条件单有重复挂单风险。
@@ -138,6 +139,16 @@ async function placeOrder(ex, symbol, type, side, amount, price, params, exchang
     const isPosSideError = isOkxSwap && p.posSide && errMsg.includes('posSide');
     if (isPosSideError) {
       delete p.posSide;
+      return await ex.createOrder(symbol, type, side, amount, price, p);
+    }
+    // 币安双向持仓(hedge mode): 开/加仓单未带 positionSide → 报 -4061。补 positionSide 重试一次:
+    // 开/加仓 buy→LONG、sell→SHORT。与 OKX 51000 不同,-4061 是币安**下单前的硬校验拒绝**(订单未入场),
+    // retry 不存在重复成交风险,所以这里安全。平仓/reduceOnly 单由 closeParamsFor 显式给 positionSide,
+    // 不会走到这(单向账户也不会:不带 positionSide 本就能下,不报 -4061)。
+    const isHedgeError = isBinanceSwap && !p.positionSide && !p.reduceOnly
+      && (errMsg.includes('-4061') || errMsg.includes('position side does not match'));
+    if (isHedgeError) {
+      p.positionSide = side === 'buy' ? 'LONG' : 'SHORT';
       return await ex.createOrder(symbol, type, side, amount, price, p);
     }
     throw e;
@@ -715,8 +726,23 @@ cli({
   },
   cancel_order: async ({ exchange, symbol, order_id, market_type }) => {
     const ex = await getExchange(exchange, market_type);
-    if (order_id) return ex.cancelOrder(order_id, symbol);
-    return ex.cancelAllOrders(symbol);
+    if (order_id) {
+      try { return await ex.cancelOrder(order_id, symbol); }
+      catch (e) {
+        // 普通订单端点找不到 → 多半是条件/算法单(币安 STOP_MARKET/TAKE_PROFIT/TRAILING 走独立的
+        // Algo 系统,id 是 algoId,不在 /fapi/v1/order)。用 {stop:true} 走条件单端点重试一次。
+        if (String(e).includes('-2011') || /Unknown order/i.test(String(e))) {
+          return await ex.cancelOrder(order_id, symbol, { stop: true });
+        }
+        throw e;
+      }
+    }
+    // 无 id = 全撤。普通挂单 + 条件/算法单都要清 —— 币安 cancelAllOrders 不含条件单(set_stop 挂的
+    // 止盈止损就是这类),必须再用 {stop:true} 单独撤一遍。对不支持的交易所静默跳过。
+    const out = {};
+    try { out.regular = await ex.cancelAllOrders(symbol); } catch (e) { out.regular = { error: String(e).slice(0, 160) }; }
+    try { out.conditional = await ex.cancelAllOrders(symbol, { stop: true }); } catch (e) { out.conditional = { skipped: String(e).slice(0, 120) }; }
+    return out;
   },
   set_leverage: async ({ exchange, symbol, leverage, market_type }) => {
     const ex = await getExchange(exchange, market_type);
