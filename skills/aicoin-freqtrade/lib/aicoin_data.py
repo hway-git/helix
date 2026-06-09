@@ -287,7 +287,20 @@ class AiCoinData:
         rows = (data or {}).get('funding_rates') or []
         if not rows:
             raise AiCoinError('no funding-rate data')
-        return float(rows[0].get('close', 0) or 0) * 100
+        # v3 时序是升序(oldest-first,与 K 线一致),rows[0] 是窗口内**最旧**的一条。
+        # 别假设顺序 —— 按时间字段取最大那条作为"最新";取不到时间字段才退回 rows[-1](升序末尾)。
+        def _ts(r):
+            for k in ('close_time', 'time', 'timestamp', 'ts', 'create_time', 'fundingTime'):
+                v = r.get(k)
+                if v is not None:
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        pass
+            return None
+        latest = max(rows, key=lambda r: (_ts(r) if _ts(r) is not None else float('-inf'))) \
+            if any(_ts(r) is not None for r in rows) else rows[-1]
+        return float(latest.get('close', 0) or 0) * 100
 
     def oi_trend(self, pair: str, exchange: str = 'binance'):
         """(is_rising, change_pct) for aggregated open interest.
