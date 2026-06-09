@@ -32,6 +32,7 @@
   ],
   "scripts": {
     "validate": "node scripts/validate-skills.mjs",
+    "verify-orders": "node skills/aicoin-trading/scripts/verify-order-matrix.mjs",
     "prepublishOnly": "node scripts/validate-skills.mjs",
     "postinstall": "echo '\\n  coinos-skills installed!\\n  Skills: aicoin-market, aicoin-account, aicoin-trading, aicoin-freqtrade, aicoin-hyperliquid, aicoin-onchain\\n  Docs: https://www.aicoin.com/opendata\\n'"
   },
