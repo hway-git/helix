@@ -120,9 +120,9 @@ node scripts/exchange.mjs stop_orders '{"exchange":"binance","symbol":"HYPE/USDT
 
 ## 数量
 
-**合约自动换算：** amount 传用户说的币数量（如 0.01），脚本自动转张数。传整数则视为张数。
-**用 USDT 金额下单：** 当用户说"用10U做多"或"花10 USDT开仓"，传 `cost=10`（USDT保证金金额），不要传 amount。脚本会根据当前价格、杠杆自动计算合约张数。
-**现货：** amount = 币数量。
+**合约自动换算：** `amount` 一律是用户说的**币数量**（如 0.01 BTC、1000 DOGE），脚本统一按 `amount / contractSize` 自动换算成张数 —— 整数也按币数量算（旧版"整数=张数"的约定在 OKX/Gate 等 contractSize≠1 的所会把张数算错几个数量级，已废除）。**确实要直接传张数**时加 `"amount_unit":"contracts"`。
+**用 USDT 金额下单：** 当用户说"用10U做多"或"花10 USDT开仓"，传 `cost=10`（合约=USDT保证金金额，按价格+杠杆算张数；现货市价买入=花多少 USDT，按现价反算币数量），不要传 amount。
+**现货：** `amount` = 币数量；或用 `cost` 按 USDT 金额买入。
 
 **格式：** 现货 `BTC/USDT`，合约 `BTC/USDT:USDT`，Hyperliquid 用 USDC: `BTC/USDC:USDC`。
 
