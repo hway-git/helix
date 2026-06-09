@@ -90,7 +90,7 @@ node scripts/exchange.mjs stop_orders '{"exchange":"binance","symbol":"HYPE/USDT
 
 - 参数：`stop_loss`（止损触发价）/ `take_profit`（止盈触发价）至少给一个，可同时给；只给单一 `trigger_price` 会按方向自动归类为止损或止盈。`amount` 可选，默认全仓，超过持仓自动 clamp。`side`（`long`/`short`）：当同一交易对**同时持有多空两个仓**（双向持仓）时必须指定，否则 `set_stop` 会报错让你选边，绝不替你猜。
 - **多单**：止损 < 现价、止盈 > 现价；**空单**反之。设反会被 `set_stop` 拦下报错（防瞬间触发）。拿不到当前价时默认中止（无法校验方向），确需跳过校验可传 `"force":true` 自负风险。
-- **双向持仓（hedge mode）全自动适配**：开仓自动补 `positionSide`（buy→LONG / sell→SHORT），止损/止盈/平仓从真实持仓推导方向 —— 币安/OKX/Bybit 双向账户都无需手动指定 `positionSide`。`set_stop` 挂的止损/止盈是交易所条件/算法单（`stop_orders` 可查），平仓后用 `cancel_order` 可一并清掉残留条件单。
+- **双向持仓（hedge mode）全自动适配**：开仓自动补方向参数（币安 `positionSide`、OKX `posSide`、Bybit `positionIdx`），止损/止盈/平仓从真实持仓推导方向 —— 币安/OKX/Bybit/Bitget/HTX 双向账户都无需手动指定。其中 Bitget/HTX 平仓由 ccxt 翻成 `tradeSide:Close`/`offset:close`（纯 `reduceOnly` 在它们的双向模式会被当反向开仓，已专门处理）；Bitget 持仓模式万一识别不出会**中止并报错**而非冒险反向开仓。`set_stop` 挂的止损/止盈是交易所条件/算法单（`stop_orders` 可查），平仓后用 `cancel_order` 可一并清掉残留条件单。
 - 确认执行前 `set_stop` 会**再读一次持仓**把数量校准到当前仓位；若确认期间仓位已被平掉/反手，会直接报告“持仓已不存在”而不挂废单。
 - **为什么有步骤3**：条件单在部分交易所（OKX 等）属算法/委托单，**不出现在普通 `open_orders` 列表**，只能用 `stop_orders` 或交易所 APP 的「条件委托」栏查到。别用 `open_orders` 误判“没挂上”。
 - **兜底**：ccxt 跨所条件单细节有差异（币安触发用标记价/最新价、OKX algo 单等），若 `set_stop` 某条返回失败，如实告诉用户失败原因，并建议去交易所 APP 手动挂——不要谎报已挂上。
