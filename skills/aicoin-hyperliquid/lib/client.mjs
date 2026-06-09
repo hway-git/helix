@@ -161,7 +161,10 @@ export function summarizeTimeseries(arr) {
     for (let i = 1; i < ts.length; i++) { if (ts[i] < ts[i - 1]) asc = false; if (ts[i] > ts[i - 1]) desc = false; }
     if (asc || desc) { field = k; order = asc ? 'ascending (最新在末尾)' : 'descending (最新在开头 arr[0])'; break; }
   }
-  if (!field) field = candidates[0];
+  // 没有任何"时间列"单调 → 这多半不是真时序,而是带逐行时间戳的排名/快照列表(volume/OI/榜单等)。
+  // 此时 latest=时间戳最大那行会指向"最近更新的那一行"而非榜首,误导性强 —— 干脆不附 _timeseries,
+  // 退回 SKILL.md 文档约定。真正的时序数据一定按时间单调(asc/desc),会在上面命中。
+  if (!field) return null;
   let li = 0, oi = 0, lv = toTs(arr[0][field]), ov = lv;
   arr.forEach((e, i) => { const v = toTs(e[field]); if (v > lv) { lv = v; li = i; } if (v < ov) { ov = v; oi = i; } });
   return {
