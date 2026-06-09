@@ -144,6 +144,25 @@ async function placeOrder(ex, symbol, type, side, amount, price, params, exchang
   if (isOkxSwap && !p.posSide && !p.reduceOnly) {
     p.posSide = side === 'buy' ? 'long' : 'short';
   }
+  // ── 条件单安全网(fail-safe)──
+  // 调用方传了触发价意图(止盈止损/触发单/追踪),但该所 ccxt 没把它映射成真条件单时,拒绝下单。
+  // 实测 Gate / HTX 的 stopLossPrice/takeProfitPrice 经 ccxt 映射成**空**(触发价被静默丢弃)→ 会被
+  // 当成"立即市价单"下出去(止损瞬间变成立即成交)。这比"不支持"更危险,必须在下单前拦下。
+  const TRIGGER_INTENT = ['stopLossPrice', 'takeProfitPrice', 'triggerPrice', 'stopPrice', 'trailingPercent', 'callbackRate', 'trailingTriggerPrice'];
+  if (TRIGGER_INTENT.some((k) => p[k] != null) && typeof ex.createOrderRequest === 'function') {
+    let req = null;
+    try { req = ex.createOrderRequest(symbol, type, side, amount, price, p); } catch { /* 构建报错则放行,真调用会抛同样的错 */ }
+    if (req) {
+      const s = JSON.stringify(req).toLowerCase();
+      // 各所 native 触发信号(由 7 家 createOrderRequest 实测归纳): binance type=STOP*/TAKE_PROFIT*/TRAILING*、
+      // okx ordType=conditional/trigger/move_order_stop+slTriggerPx/tpTriggerPx、bybit triggerPrice、
+      // bitget planType、htx trigger_type/formula_price、通用 stopPrice/callbackRate/trailing。
+      const SIGNALS = ['trigger', 'stopprice', 'sltriggerpx', 'tptriggerpx', 'plantype', 'algotype', 'callback', 'trailing', 'conditional', 'move_order_stop', 'formula_price', 'stop_market', 'take_profit', 'activationprice'];
+      if (!SIGNALS.some((sig) => s.includes(sig))) {
+        throw new Error(`${exchange} 无法把这种条件单(止盈止损/触发/追踪)通过统一参数下出 —— 触发价会被静默丢弃、变成立即成交的市价单。已拒绝下单以防误成交。请改用支持的交易所(Binance/OKX/Bybit/Bitget),或到交易所端手动挂条件单。`);
+      }
+    }
+  }
   try {
     return await ex.createOrder(symbol, type, side, amount, price, p);
   } catch (e) {
