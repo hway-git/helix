@@ -1,0 +1,130 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-up: var(--up);
+  --color-up-foreground: var(--up-foreground);
+  --color-down: var(--down);
+  --color-down-foreground: var(--down-foreground);
+  --color-panel: var(--panel);
+  --color-grid: var(--grid);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+
+  --font-sans: var(--font-geist-sans, ui-sans-serif, system-ui, sans-serif);
+  --font-mono: var(--font-geist-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+}
+
+:root {
+  color-scheme: dark;
+  --background: oklch(0.16 0.008 250);
+  --foreground: oklch(0.95 0.005 250);
+  --card: oklch(0.2 0.01 250);
+  --card-foreground: oklch(0.95 0.005 250);
+  --popover: oklch(0.2 0.01 250);
+  --popover-foreground: oklch(0.95 0.005 250);
+  --primary: oklch(0.74 0.17 150);
+  --primary-foreground: oklch(0.16 0.02 150);
+  --secondary: oklch(0.26 0.012 250);
+  --secondary-foreground: oklch(0.95 0.005 250);
+  --muted: oklch(0.24 0.01 250);
+  --muted-foreground: oklch(0.68 0.012 250);
+  --accent: oklch(0.72 0.11 200);
+  --accent-foreground: oklch(0.16 0.02 200);
+  --destructive: oklch(0.64 0.21 22);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.74 0.17 150);
+
+  --up: oklch(0.74 0.17 150);
+  --up-foreground: oklch(0.16 0.02 150);
+  --down: oklch(0.64 0.21 22);
+  --down-foreground: oklch(0.98 0.01 22);
+  --panel: oklch(0.185 0.009 250);
+  --grid: oklch(1 0 0 / 6%);
+
+  --chart-1: oklch(0.74 0.17 150);
+  --chart-2: oklch(0.72 0.11 200);
+  --chart-3: oklch(0.78 0.15 85);
+  --chart-4: oklch(0.64 0.21 22);
+  --chart-5: oklch(0.68 0.13 300);
+
+  --radius: 0.5rem;
+
+  --sidebar: oklch(0.18 0.009 250);
+  --sidebar-foreground: oklch(0.95 0.005 250);
+  --sidebar-primary: oklch(0.74 0.17 150);
+  --sidebar-primary-foreground: oklch(0.16 0.02 150);
+  --sidebar-accent: oklch(0.26 0.012 250);
+  --sidebar-accent-foreground: oklch(0.95 0.005 250);
+  --sidebar-border: oklch(1 0 0 / 9%);
+  --sidebar-ring: oklch(0.74 0.17 150);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Thin custom scrollbars for a terminal feel */
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: var(--border);
+    border-radius: 9999px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
