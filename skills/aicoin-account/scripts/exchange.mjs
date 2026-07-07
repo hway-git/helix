@@ -9,6 +9,18 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
+const IS_ACCOUNT_SKILL = resolve(__dir, '..').endsWith('aicoin-account');
+
+function assertTradingAllowed(action) {
+  if (IS_ACCOUNT_SKILL) {
+    throw new Error(`aicoin-account 是账户查询 skill，不允许执行 ${action}。请改用 aicoin-trading skill，并走预览 + 确认流程。`);
+  }
+}
+
+function writePrivateJson(file, obj) {
+  writeFileSync(file, JSON.stringify(obj));
+  try { chmodSync(file, 0o600); } catch {}
+}
 
 // .env auto-load (宿主可能不向子进程注入 env)。共享 loader,见 lib/env-loader.mjs。
 loadEnv();
@@ -439,6 +451,7 @@ cli({
     return ex.fetchOrder(order_id, symbol);
   },
   create_order: async ({ exchange, symbol, type, side, amount, amount_unit, cost, leverage, price, market_type, params, confirmed }) => {
+    assertTradingAllowed('create_order');
     const pendingFile = resolve(__dir, '..', '.pending-order.json');
 
     // Internal calls (from auto-trade.mjs) bypass file-based confirmation
@@ -568,7 +581,7 @@ cli({
     }
 
     const pendingOrder = { exchange, symbol, type, side, amount, price, market_type, params, timestamp: Date.now() };
-    writeFileSync(pendingFile, JSON.stringify(pendingOrder));
+    writePrivateJson(pendingFile, pendingOrder);
 
     // Build order details
     const sideLabel = side === 'buy' ? '买入/做多' : '卖出/做空';
@@ -635,13 +648,32 @@ cli({
     };
   },
   close_position: async ({ exchange, symbol, market_type, confirmed }) => {
-    const mt = market_type || 'swap';
+    assertTradingAllowed('close_position');
+    const pendingFile = resolve(__dir, '..', '.pending-close.json');
+    const isConfirm = confirmed === 'true' || confirmed === true;
+    let mt = market_type || 'swap';
+    if (isConfirm) {
+      let pending;
+      try { pending = JSON.parse(readFileSync(pendingFile, 'utf8')); }
+      catch { throw new Error('没有待确认的平仓预览。请先不带 confirmed 参数调用 close_position 预览，等用户确认后再带 confirmed=true。'); }
+      if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
+        try { unlinkSync(pendingFile); } catch {}
+        throw new Error('平仓预览已过期（超过5分钟），请重新创建平仓预览。');
+      }
+      exchange = pending.exchange;
+      symbol = pending.symbol;
+      mt = pending.market_type || 'swap';
+    }
     const ex = await getExchange(exchange, mt);
     const positions = await ex.fetchPositions(symbol ? [symbol] : undefined);
     const open = positions.filter(p => Math.abs(Number(p.contracts || 0)) > 0);
-    if (!open.length) return { message: '当前没有持仓需要平仓。', positions: [] };
+    if (!open.length) {
+      if (isConfirm) { try { unlinkSync(pendingFile); } catch {} }
+      return { message: '当前没有持仓需要平仓。', positions: [] };
+    }
     // Preview
-    if (confirmed !== 'true' && confirmed !== true) {
+    if (!isConfirm) {
+      writePrivateJson(pendingFile, { exchange, symbol, market_type: mt, timestamp: Date.now() });
       return {
         _preview: true,
         status: '⚠️ 平仓预览 — 订单未下达',
@@ -673,6 +705,7 @@ cli({
         results.push({ symbol: pos.symbol, side: pos.side, amount, status: '失败', error: e.message });
       }
     }
+    try { unlinkSync(pendingFile); } catch {}
     return { 平仓结果: results };
   },
   // 止盈止损 / 条件单 —— 给"已有仓位"挂服务器端保护单。两步确认。
@@ -680,6 +713,7 @@ cli({
   // 触发价做"在现价正确一侧"校验(防搞反/瞬间触发),用 ccxt 统一参数 stopLossPrice/
   // takeProfitPrice 下独立的 reduceOnly 条件单(跨 Binance/OKX/Bybit 等通用)。
   set_stop: async ({ exchange, symbol, market_type, stop_loss, take_profit, trigger_price, amount, side, force, confirmed }) => {
+    assertTradingAllowed('set_stop');
     const pendingFile = resolve(__dir, '..', '.pending-stop.json');
 
     // Step 2: 确认执行(读 step1 落盘的已解析订单,防 model 在两步之间篡改方向/数量/触发价)
@@ -810,7 +844,7 @@ cli({
       : 'one-way / reduceOnly';
 
     const pending = { exchange, symbol, market_type: mt, closeSide, posSide: pos.side, amount: amt, orders, timestamp: Date.now() };
-    writeFileSync(pendingFile, JSON.stringify(pending));
+    writePrivateJson(pendingFile, pending);
 
     return {
       _preview: true,
@@ -862,6 +896,7 @@ cli({
     return { rates, arbitrage: null, _note: 'Need at least 2 successful rate queries to calculate arbitrage spread' };
   },
   cancel_order: async ({ exchange, symbol, order_id, market_type }) => {
+    assertTradingAllowed('cancel_order');
     const ex = await getExchange(exchange, market_type);
     if (order_id) {
       try { return await ex.cancelOrder(order_id, symbol); }
@@ -906,10 +941,12 @@ cli({
     return out;
   },
   set_leverage: async ({ exchange, symbol, leverage, market_type }) => {
+    assertTradingAllowed('set_leverage');
     const ex = await getExchange(exchange, market_type);
     return ex.setLeverage(leverage, symbol);
   },
   set_margin_mode: async ({ exchange, symbol, margin_mode, market_type, leverage }) => {
+    assertTradingAllowed('set_margin_mode');
     const ex = await getExchange(exchange, market_type);
     try {
       const modeParams = exchange === 'okx' && leverage ? { lever: String(leverage) } : {};
@@ -962,6 +999,7 @@ cli({
     }
   },
   set_trading_params: async ({ exchange, symbol, leverage, margin_mode, market_type }) => {
+    assertTradingAllowed('set_trading_params');
     if (!symbol) throw new Error('symbol is required, e.g. BTC/USDT:USDT');
     if (!leverage && !margin_mode) throw new Error('At least one of leverage or margin_mode is required');
     const ex = await getExchange(exchange, market_type || 'swap');
@@ -1050,6 +1088,7 @@ cli({
     return results;
   },
   transfer: async ({ exchange, code, amount, from_account, to_account }) => {
+    assertTradingAllowed('transfer');
     // OKX unified account: no transfer needed
     if (exchange === 'okx') {
       return {

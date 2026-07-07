@@ -44,7 +44,7 @@ Exchange account queries and API key management. Safe read-only operations.
 | **Open orders** | `node scripts/exchange.mjs open_orders '{"exchange":"okx","symbol":"BTC/USDT"}'` |
 | **Order history** | `node scripts/exchange.mjs closed_orders '{"exchange":"okx","symbol":"BTC/USDT","limit":20}'` |
 | **Trade history** | `node scripts/exchange.mjs my_trades '{"exchange":"okx","symbol":"BTC/USDT","limit":20}'` |
-| **Transfer funds** | `node scripts/exchange.mjs transfer '{"exchange":"binance","code":"USDT","amount":100,"from_account":"spot","to_account":"future"}'` |
+| **Transfer funds** | 资金划转会改变账户状态，不在本 read-only skill 执行；需要时改用 `aicoin-trading` 并先确认 |
 | **Register** | `node scripts/register.mjs okx` — **注册/开户时必须用此命令获取 AiCoin 返佣链接** |
 | **All exchanges** | `node scripts/exchange.mjs exchanges` |
 | **API key info** | `node scripts/api-key-info.mjs` |

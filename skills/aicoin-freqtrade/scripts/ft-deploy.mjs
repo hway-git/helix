@@ -13,10 +13,10 @@
 // freqtrade CLI + freqtrade REST API 完成, 跟 dashboard 看到的状态保持一致.
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync,
-  readdirSync, renameSync, chmodSync,
+  readdirSync, renameSync, chmodSync, openSync, closeSync,
 } from 'node:fs';
 import { resolve, dirname } from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
@@ -55,7 +55,7 @@ const ENV_FILE   = ENV ? ENV.envFile           : envFileCandidates()[0]; // host
 //      没有时才走 setup.sh 装到 venv.
 const FT_BIN = ENV ? 'freqtrade' : (() => {
   try {
-    const sys = execSync('command -v freqtrade', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const sys = execFileSync('which', ['freqtrade'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     if (sys && existsSync(sys)) return sys;
   } catch {}
   return HOST.ftBin;
@@ -66,8 +66,52 @@ function run(cmd, opts = {}) {
   return execSync(cmd, { encoding: 'utf-8', timeout: 600000, ...opts }).trim();
 }
 
+function runFile(file, args = [], opts = {}) {
+  return execFileSync(file, args, { encoding: 'utf-8', timeout: 600000, ...opts }).trim();
+}
+
 function hasCommand(cmd) {
-  try { run(`which ${cmd}`); return true; } catch { return false; }
+  try { runFile('which', [cmd]); return true; } catch { return false; }
+}
+
+function proxyEnv() {
+  const proxyUrl = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  return proxyUrl ? { ...process.env, HTTPS_PROXY: proxyUrl, HTTP_PROXY: proxyUrl } : process.env;
+}
+
+function parseTailLines(lines, fallback = 50) {
+  const n = Number(lines ?? fallback);
+  if (!Number.isInteger(n) || n < 1 || n > 1000) {
+    throw new Error('lines 必须是 1-1000 的整数');
+  }
+  return n;
+}
+
+function assertStrategyName(strategy) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(strategy || ''))) {
+    throw new Error(`strategy 必须是 Python class 名称,例如 MyStrategy; 收到: ${strategy}`);
+  }
+  return strategy;
+}
+
+function startHostTrade(strategy) {
+  const logFd = openSync(HOST.logFile, 'a');
+  try {
+    const child = spawn(FT_BIN, [
+      'trade',
+      '--config', CONFIG_PATH,
+      '--strategy', strategy,
+      '--userdir', USER_DATA,
+    ], {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: proxyEnv(),
+    });
+    child.unref();
+    writeFileSync(HOST.pidFile, `${child.pid}\n`);
+  } finally {
+    closeSync(logFd);
+  }
 }
 
 // 轻量 env 读取 — freqtrade-api.mjs 已经 loadEnv() 一次, 这里是为了 host
@@ -147,13 +191,13 @@ function restartDaemon() {
   if (!ENV) throw new Error('restart daemon 仅在 coinclaw 容器内可用');
   const sock = supervisorSocket();
   try {
-    execSync(`supervisorctl -s unix://${sock} restart freqtrade`, {
+    execFileSync('supervisorctl', ['-s', `unix://${sock}`, 'restart', 'freqtrade'], {
       stdio: 'pipe', timeout: 30000,
     });
     return { method: 'supervisorctl' };
   } catch (e) {
     try {
-      const pid = run("pgrep -f 'freqtrade trade' | head -n1");
+      const pid = runFile('pgrep', ['-f', 'freqtrade trade']).split('\n')[0]?.trim();
       if (pid) {
         process.kill(Number(pid), 'SIGTERM');
         return { method: 'kill+autorestart', pid: Number(pid) };
@@ -191,7 +235,7 @@ function findPython() {
   }
   for (const bin of candidates) {
     try {
-      const version = run(`${bin} --version`);
+      const version = runFile(bin, ['--version']);
       const match = version.match(/(\d+)\.(\d+)/);
       if (match) {
         const major = Number(match[1]); const minor = Number(match[2]);
@@ -215,11 +259,11 @@ function ensureModernPython() {
       }
       if (existsSync(uvBin)) {
         console.error('Installing Python 3.12 via uv...');
-        run(`${uvBin} python install 3.12`, { timeout: 300000 });
+        runFile(uvBin, ['python', 'install', '3.12'], { timeout: 300000 });
         try {
-          const pyPath = run(`${uvBin} python find 3.12`);
+          const pyPath = runFile(uvBin, ['python', 'find', '3.12']);
           if (pyPath) {
-            const ver = run(`${pyPath} --version`);
+            const ver = runFile(pyPath, ['--version']);
             const m = ver.match(/(\d+)\.(\d+)/);
             if (m && Number(m[1]) === 3 && Number(m[2]) >= 11) {
               return { bin: pyPath, major: Number(m[1]), minor: Number(m[2]), version: ver };
@@ -233,7 +277,7 @@ function ensureModernPython() {
       if (hasCommand('brew')) {
         console.error('Trying brew install python@3.12...');
         const brewEnv = { ...process.env, HOMEBREW_NO_AUTO_UPDATE: '1', HOMEBREW_NO_INSTALL_CLEANUP: '1' };
-        run('brew install python@3.12', { timeout: 300000, env: brewEnv });
+        runFile('brew', ['install', 'python@3.12'], { timeout: 300000, env: brewEnv });
         py = findPython();
         if (py) return py;
       }
@@ -359,7 +403,7 @@ const actions = {
     checks.python = py ? `${py.version} (${py.bin})` : false;
     if (!py) {
       try {
-        const v = run('python3 --version');
+        const v = runFile('python3', ['--version']);
         checks.python_warning = `${v} found but Freqtrade requires 3.11+. Deploy will auto-install 3.12.`;
       } catch {}
     }
@@ -367,7 +411,7 @@ const actions = {
     checks.source_cloned = existsSync(resolve(HOST.sourceDir, 'setup.sh'));
     checks.freqtrade_installed = existsSync(FT_BIN);
     if (checks.freqtrade_installed) {
-      try { checks.freqtrade_version = run(`${FT_BIN} --version`); } catch {}
+      try { checks.freqtrade_version = runFile(FT_BIN, ['--version']); } catch {}
     }
     const ex = detectExchange();
     checks.exchange = ex ? { name: ex.name, configured: true } : { configured: false };
@@ -390,7 +434,7 @@ const actions = {
   // host 模式: 沿用老路径 (clone + setup.sh + nohup).
   deploy: async (params = {}) => {
     if (ENV) {
-      const strategy = params.strategy;
+      const strategy = params.strategy ? assertStrategyName(params.strategy) : null;
       if (!strategy) throw new Error('strategy 必填, 例: {"strategy":"MyStrat"}');
       const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
       if (!existsSync(stratFile)) {
@@ -437,13 +481,13 @@ const actions = {
     if (!existsSync(FT_BIN)) {
       if (!existsSync(resolve(HOST.sourceDir, 'setup.sh'))) {
         console.error('Cloning Freqtrade repository...');
-        run(`git clone https://github.com/freqtrade/freqtrade.git ${HOST.sourceDir}`, { timeout: 120000 });
-        run(`cd ${HOST.sourceDir} && git checkout stable`, { timeout: 30000 });
+        runFile('git', ['clone', 'https://github.com/freqtrade/freqtrade.git', HOST.sourceDir], { timeout: 120000 });
+        runFile('git', ['checkout', 'stable'], { cwd: HOST.sourceDir, timeout: 30000 });
       }
       console.error('Running Freqtrade setup.sh (this may take a few minutes)...');
       const pyDir = dirname(py.bin);
       const setupEnv = { ...process.env, PATH: `${pyDir}:${process.env.PATH}` };
-      run(`cd ${HOST.sourceDir} && ./setup.sh -i`, { timeout: 600000, env: setupEnv });
+      runFile(resolve(HOST.sourceDir, 'setup.sh'), ['-i'], { cwd: HOST.sourceDir, timeout: 600000, env: setupEnv });
       if (!existsSync(FT_BIN)) throw new Error('Freqtrade installation failed.');
     }
     const apiPassword = randomBytes(8).toString('hex');
@@ -454,14 +498,12 @@ const actions = {
     if (!existsSync(samplePath)) writeFileSync(samplePath, SAMPLE_STRATEGY);
     const oldPid = getHostPid();
     if (oldPid) { try { process.kill(oldPid, 'SIGTERM'); } catch {} }
-    const strategy = params.strategy || 'SampleStrategy';
+    const strategy = assertStrategyName(params.strategy || 'SampleStrategy');
     const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
     if (strategy !== 'SampleStrategy' && !existsSync(stratFile)) {
       throw new Error(`Strategy "${strategy}" not found at ${stratFile}. Use create_strategy first.`);
     }
-    const proxyEnv = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-    const proxyPrefix = proxyEnv ? `env HTTPS_PROXY=${proxyEnv} HTTP_PROXY=${proxyEnv} ` : '';
-    run(`nohup ${proxyPrefix}${FT_BIN} trade --config ${CONFIG_PATH} --strategy ${strategy} --userdir ${USER_DATA} > ${HOST.logFile} 2>&1 & echo $! > ${HOST.pidFile}`);
+    startHostTrade(strategy);
     let ready = false;
     for (let i = 0; i < 15; i++) {
       await new Promise((r) => setTimeout(r, 2000));
@@ -504,7 +546,7 @@ const actions = {
     const pid = getHostPid();
     if (pid) { try { process.kill(pid, 'SIGTERM'); } catch {} }
     console.error('Updating Freqtrade...');
-    run(`cd ${HOST.sourceDir} && ./setup.sh -u`, { timeout: 600000 });
+    runFile(resolve(HOST.sourceDir, 'setup.sh'), ['-u'], { cwd: HOST.sourceDir, timeout: 600000 });
     return { updated: true, mode: 'host', note: 'Run start to restart Freqtrade.' };
   },
 
@@ -520,7 +562,7 @@ const actions = {
       ];
       for (const log of logCandidates) {
         if (existsSync(log)) {
-          try { result.last_logs = run(`tail -10 ${log}`); break; } catch {}
+          try { result.last_logs = runFile('tail', ['-10', log]); break; } catch {}
         }
       }
       return result;
@@ -528,7 +570,7 @@ const actions = {
     const pid = getHostPid();
     if (!pid) return { mode: 'host', running: false };
     let lastLogs = '';
-    try { lastLogs = run(`tail -5 ${HOST.logFile} 2>/dev/null`); } catch {}
+    try { lastLogs = runFile('tail', ['-5', HOST.logFile]); } catch {}
     return { mode: 'host', running: true, pid, log_file: HOST.logFile, last_logs: lastLogs };
   },
 
@@ -538,7 +580,7 @@ const actions = {
     if (ENV) {
       const sock = supervisorSocket();
       try {
-        run(`supervisorctl -s unix://${sock} stop freqtrade`);
+        runFile('supervisorctl', ['-s', `unix://${sock}`, 'stop', 'freqtrade']);
         return { stopped: true, mode: 'coinclaw', method: 'supervisorctl' };
       } catch (e) {
         return { stopped: false, error: e.message, note: 'supervisorctl 不可达, 试试 ft.mjs stop (REST)' };
@@ -555,7 +597,7 @@ const actions = {
     if (ENV) {
       const sock = supervisorSocket();
       try {
-        run(`supervisorctl -s unix://${sock} start freqtrade`);
+        runFile('supervisorctl', ['-s', `unix://${sock}`, 'start', 'freqtrade']);
         return { started: true, mode: 'coinclaw', method: 'supervisorctl' };
       } catch (e) {
         return { started: false, error: e.message };
@@ -564,10 +606,8 @@ const actions = {
     if (getHostPid()) return { started: false, mode: 'host', reason: 'Already running' };
     if (!existsSync(FT_BIN)) throw new Error('Freqtrade not installed. Run deploy first.');
     if (!existsSync(CONFIG_PATH)) throw new Error('No config found. Run deploy first.');
-    const strategy = params.strategy || 'SampleStrategy';
-    const proxyUrl = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-    const proxyPrefix = proxyUrl ? `env HTTPS_PROXY=${proxyUrl} HTTP_PROXY=${proxyUrl} ` : '';
-    run(`nohup ${proxyPrefix}${FT_BIN} trade --config ${CONFIG_PATH} --strategy ${strategy} --userdir ${USER_DATA} > ${HOST.logFile} 2>&1 & echo $! > ${HOST.pidFile}`);
+    const strategy = assertStrategyName(params.strategy || 'SampleStrategy');
+    startHostTrade(strategy);
     await new Promise((r) => setTimeout(r, 3000));
     return { started: true, mode: 'host', pid: getHostPid() };
   },
@@ -576,15 +616,16 @@ const actions = {
   // coinclaw 模式: tail /workspace/logs/freqtrade.log (supervisord 写在那).
   // host 模式: tail freqtrade.log.
   logs: async ({ lines = 50 } = {}) => {
+    const n = parseTailLines(lines);
     if (ENV) {
       for (const log of ['/workspace/logs/freqtrade.log', '/workspace/logs/freqtrade-error.log']) {
         if (existsSync(log)) {
-          try { return { mode: 'coinclaw', log_file: log, logs: run(`tail -${lines} ${log}`) }; } catch {}
+          try { return { mode: 'coinclaw', log_file: log, logs: runFile('tail', [`-${n}`, log]) }; } catch {}
         }
       }
       return { mode: 'coinclaw', logs: '(no log file found in /workspace/logs)' };
     }
-    try { return { mode: 'host', logs: run(`tail -${lines} ${HOST.logFile} 2>/dev/null`) }; }
+    try { return { mode: 'host', logs: runFile('tail', [`-${n}`, HOST.logFile]) }; }
     catch { return { mode: 'host', logs: 'No log file found' }; }
   },
 
@@ -605,35 +646,38 @@ const actions = {
       writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
       console.error(`Auto-created backtest config (exchange: ${exchange})`);
     }
-    const strategy = params.strategy || 'SampleStrategy';
+    const strategy = assertStrategyName(params.strategy || 'SampleStrategy');
     const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
     if (!existsSync(stratFile)) {
       throw new Error(`Strategy "${strategy}" not found at ${stratFile}. Use create_strategy or list with strategy_list.`);
     }
     const timeframe = params.timeframe || '1h';
     const timerange = params.timerange || '';
-    const timerangeArg = timerange ? ` --timerange ${timerange}` : '';
     const pairs = params.pairs;
-    const pairsArg = pairs ? ` -p ${(Array.isArray(pairs) ? pairs : [pairs]).join(' ')}` : '';
-
-    const proxyEnv = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-    const proxyPrefix = proxyEnv ? `env HTTPS_PROXY=${proxyEnv} HTTP_PROXY=${proxyEnv} ` : '';
+    const pairList = pairs ? (Array.isArray(pairs) ? pairs : [pairs]) : [];
 
     console.error('Downloading historical data...');
     try {
-      run(
-        `${proxyPrefix}${FT_BIN} download-data --config ${CONFIG_PATH} --timeframe ${timeframe}${timerangeArg}${pairsArg} --userdir ${USER_DATA}`,
-        { timeout: 300000 }
-      );
+      const args = ['download-data', '--config', CONFIG_PATH, '--timeframe', timeframe, '--userdir', USER_DATA];
+      if (timerange) args.push('--timerange', timerange);
+      if (pairList.length) args.push('-p', ...pairList);
+      runFile(FT_BIN, args, { timeout: 300000, env: proxyEnv() });
     } catch (e) {
       console.error(`Data download warning: ${e.message}`);
     }
 
     console.error(`Running backtest: strategy=${strategy}, timeframe=${timeframe}${timerange ? `, timerange=${timerange}` : ''}...`);
-    const rawOutput = run(
-      `${proxyPrefix}${FT_BIN} backtesting --config ${CONFIG_PATH} --strategy ${strategy} --strategy-path ${STRAT_DIR} --timeframe ${timeframe}${timerangeArg}${pairsArg} --userdir ${USER_DATA}`,
-      { timeout: 600000 }
-    );
+    const backtestArgs = [
+      'backtesting',
+      '--config', CONFIG_PATH,
+      '--strategy', strategy,
+      '--strategy-path', STRAT_DIR,
+      '--timeframe', timeframe,
+      '--userdir', USER_DATA,
+    ];
+    if (timerange) backtestArgs.push('--timerange', timerange);
+    if (pairList.length) backtestArgs.push('-p', ...pairList);
+    const rawOutput = runFile(FT_BIN, backtestArgs, { timeout: 600000, env: proxyEnv() });
     const output = rawOutput
       .split('\n')
       .filter((l) => !l.includes('INFO') || l.includes('TOTAL') || l.includes('Result') || l.includes('trades') || l.includes('Profit') || l.includes('Drawdown') || l.includes('Win') || l.includes('Avg'))
@@ -658,16 +702,11 @@ const actions = {
     }
     const timeframe = params.timeframe || '1h';
     const timerange = params.timerange || '';
-    const timerangeArg = timerange ? ` --timerange ${timerange}` : '';
-
-    const proxyEnv = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-    const proxyPrefix = proxyEnv ? `env HTTPS_PROXY=${proxyEnv} HTTP_PROXY=${proxyEnv} ` : '';
 
     console.error(`Downloading data: timeframe=${timeframe}${timerange ? `, timerange=${timerange}` : ''}...`);
-    const output = run(
-      `${proxyPrefix}${FT_BIN} download-data --config ${CONFIG_PATH} --timeframe ${timeframe}${timerangeArg} --userdir ${USER_DATA}`,
-      { timeout: 300000 }
-    );
+    const args = ['download-data', '--config', CONFIG_PATH, '--timeframe', timeframe, '--userdir', USER_DATA];
+    if (timerange) args.push('--timerange', timerange);
+    const output = runFile(FT_BIN, args, { timeout: 300000, env: proxyEnv() });
     return { mode: ENV ? 'coinclaw' : 'host', timeframe, timerange: timerange || 'all available', output };
   },
 
@@ -685,7 +724,7 @@ const actions = {
       writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
     }
 
-    const strategy = params.strategy || 'SampleStrategy';
+    const strategy = assertStrategyName(params.strategy || 'SampleStrategy');
     const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
     if (!existsSync(stratFile)) throw new Error(`Strategy "${strategy}" not found at ${stratFile}.`);
     const timeframe = params.timeframe || '1h';
@@ -695,23 +734,29 @@ const actions = {
     const jobs = Math.min(Number(params.jobs) || 1, 4);
     const lossFunc = params.loss || 'SharpeHyperOptLoss';
     const minTrades = params.min_trades || 20;
-    const timerangeArg = timerange ? ` --timerange ${timerange}` : '';
-
-    const proxyEnv = process.env.PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-    const proxyPrefix = proxyEnv ? `env HTTPS_PROXY=${proxyEnv} HTTP_PROXY=${proxyEnv} ` : '';
 
     try {
-      run(
-        `${proxyPrefix}${FT_BIN} download-data --config ${CONFIG_PATH} --timeframe ${timeframe}${timerangeArg} --userdir ${USER_DATA}`,
-        { timeout: 300000 }
-      );
+      const downloadArgs = ['download-data', '--config', CONFIG_PATH, '--timeframe', timeframe, '--userdir', USER_DATA];
+      if (timerange) downloadArgs.push('--timerange', timerange);
+      runFile(FT_BIN, downloadArgs, { timeout: 300000, env: proxyEnv() });
     } catch (e) { console.error(`Data download warning: ${e.message}`); }
 
     console.error(`Running hyperopt: strategy=${strategy}, epochs=${epochs}, jobs=${jobs}, spaces=${spaces}`);
-    const output = run(
-      `${proxyPrefix}${FT_BIN} hyperopt --config ${CONFIG_PATH} --strategy ${strategy} --strategy-path ${STRAT_DIR} --timeframe ${timeframe}${timerangeArg} --userdir ${USER_DATA} --hyperopt-loss ${lossFunc} --spaces ${spaces} --epochs ${epochs} -j ${jobs} --min-trades ${minTrades}`,
-      { timeout: 1800000 }
-    );
+    const hyperoptArgs = [
+      'hyperopt',
+      '--config', CONFIG_PATH,
+      '--strategy', strategy,
+      '--strategy-path', STRAT_DIR,
+      '--timeframe', timeframe,
+      '--userdir', USER_DATA,
+      '--hyperopt-loss', lossFunc,
+      '--spaces', ...String(spaces).split(/\s+/).filter(Boolean),
+      '--epochs', String(epochs),
+      '-j', String(jobs),
+      '--min-trades', String(minTrades),
+    ];
+    if (timerange) hyperoptArgs.push('--timerange', timerange);
+    const output = runFile(FT_BIN, hyperoptArgs, { timeout: 1800000, env: proxyEnv() });
 
     return { mode: ENV ? 'coinclaw' : 'host', strategy, timeframe, epochs, spaces, jobs, loss_function: lossFunc, output };
   },
