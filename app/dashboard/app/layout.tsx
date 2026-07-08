@@ -6,6 +6,11 @@ export const metadata: Metadata = {
   title: 'Helix Terminal · 加密货币交易大屏',
   description: '专业加密货币交易终端：实时行情、资金费率、技术指标与 AI 分析助手',
   generator: 'v0.app',
+  icons: {
+    icon: [{ url: '/helix-logo.png', sizes: '1024x1024', type: 'image/png' }],
+    shortcut: '/helix-logo.png',
+    apple: [{ url: '/helix-logo.png', sizes: '1024x1024', type: 'image/png' }],
+  },
 }
 
 export const viewport: Viewport = {

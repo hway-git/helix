@@ -2,13 +2,10 @@
 
 import { useEffect, useRef } from 'react'
 import { createChart, LineStyle, type LineData, type Time } from 'lightweight-charts'
-import { baseChartOptions, chartColors } from './lightweight-utils'
+import type { RsiPoint } from '@/lib/market-data'
+import { baseChartOptions, chartColors, chartTime } from './lightweight-utils'
 
-function rsiTime(index: number): Time {
-  return (index + 1) as Time
-}
-
-export function RSIChart({ values }: { values: number[] }) {
+export function RSIChart({ points }: { points: RsiPoint[] }) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -47,14 +44,15 @@ export function RSIChart({ values }: { values: number[] }) {
       },
     })
 
-    const data: LineData<Time>[] = values
-      .map((value, index) => ({ time: rsiTime(index), value }))
-      .filter((point) => !Number.isNaN(point.value))
+    const data: LineData<Time>[] = points.map((point) => ({
+      time: chartTime(point.time),
+      value: point.value,
+    }))
 
-    if (values.length > 1) {
+    if (points.length > 1) {
       rangeSeries.setData([
-        { time: rsiTime(0), value: 0 },
-        { time: rsiTime(values.length - 1), value: 100 },
+        { time: chartTime(points[0].time), value: 0 },
+        { time: chartTime(points[points.length - 1].time), value: 100 },
       ])
     }
     rsiSeries.setData(data)
@@ -85,7 +83,7 @@ export function RSIChart({ values }: { values: number[] }) {
       resizeObserver.disconnect()
       chart.remove()
     }
-  }, [values])
+  }, [points])
 
   return <div ref={containerRef} className="h-full w-full" aria-label="RSI 指标图" />
 }

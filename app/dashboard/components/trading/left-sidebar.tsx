@@ -1,27 +1,21 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Bot, Newspaper, Percent, Search, Star } from 'lucide-react'
+import { Activity, Bot, LoaderCircle, Newspaper, Plus, Search, Star } from 'lucide-react'
 import { Sparkline } from '@/components/charts/sparkline'
-import {
-  FUNDING_RATES,
-  NEWS,
-  SIGNALS,
-  STRATEGIES,
-  TRADING_PAIRS,
-  formatPrice,
-} from '@/lib/market-data'
+import { formatPrice, type TradingPair } from '@/lib/market-data'
 import { cn } from '@/lib/utils'
 
-type InfoTab = 'funding' | 'signals' | 'strategies' | 'news'
+type InfoTab = 'signals' | 'strategies' | 'news'
 
 const INFO_PANEL_FALLBACK_HEIGHT = 236
 const INFO_PANEL_DEFAULT_RATIO = 0.5
-const INFO_PANEL_MIN_HEIGHT = 156
-const PAIR_LIST_MIN_VISIBLE_HEIGHT = 304
+const PAIR_LIST_HEADER_HEIGHT = 74
+const PAIR_ROW_HEIGHT = 44
+const PAIRS_VISIBLE_WHEN_PANEL_MIN = 10
+const PAIRS_VISIBLE_WHEN_PANEL_MAX = 5
 
 const infoTabs: Array<{ id: InfoTab; label: string; icon: React.ElementType }> = [
-  { id: 'funding', label: '资金', icon: Percent },
   { id: 'signals', label: '信号', icon: Activity },
   { id: 'strategies', label: '策略', icon: Bot },
   { id: 'news', label: '新闻', icon: Newspaper },
@@ -39,60 +33,108 @@ function SectionTitle({ icon, title, extra }: { icon: React.ReactNode; title: st
   )
 }
 
+function EmptyState({ label }: { label: string }) {
+  return (
+    <div className="flex h-full items-center justify-center px-3 text-center text-xs text-muted-foreground">
+      {label}
+    </div>
+  )
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
 }
 
 export function LeftSidebar({
+  pairs,
   activeSymbol,
+  loading,
   onSelect,
+  onAddPair,
 }: {
+  pairs: TradingPair[]
   activeSymbol: string
+  loading: boolean
   onSelect: (symbol: string) => void
+  onAddPair: (pair: TradingPair) => void
 }) {
   const [query, setQuery] = useState('')
-  const [infoTab, setInfoTab] = useState<InfoTab>('funding')
+  const [infoTab, setInfoTab] = useState<InfoTab>('signals')
   const [infoHeight, setInfoHeight] = useState<number | null>(null)
+  const [searchResults, setSearchResults] = useState<TradingPair[]>([])
+  const [searching, setSearching] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
   const sidebarRef = useRef<HTMLElement>(null)
   const dragRef = useRef<{ startY: number; startHeight: number } | null>(null)
   const userResizedRef = useRef(false)
 
-  const pairs = useMemo(
-    () => TRADING_PAIRS.filter((p) => p.symbol.toLowerCase().includes(query.toLowerCase())),
-    [query],
+  const filteredPairs = useMemo(
+    () => pairs.filter((p) => p.symbol.toLowerCase().includes(query.toLowerCase())),
+    [pairs, query],
+  )
+  const knownInstruments = useMemo(() => new Set(pairs.map((pair) => pair.instrumentId)), [pairs])
+  const externalResults = useMemo(
+    () => searchResults.filter((pair) => !knownInstruments.has(pair.instrumentId)),
+    [knownInstruments, searchResults],
   )
 
-  const tagColor = (tag: string) =>
-    tag === '利好'
-      ? 'text-up border-up/30 bg-up/10'
-      : tag === '利空'
-        ? 'text-down border-down/30 bg-down/10'
-        : 'text-muted-foreground border-border bg-muted/40'
+  useEffect(() => {
+    const normalized = query.trim()
+    if (normalized.length < 2) {
+      setSearchResults([])
+      setSearchError(null)
+      setSearching(false)
+      return
+    }
 
-  const signalTone = (side: string) =>
-    side === 'long'
-      ? 'border-up/30 bg-up/10 text-up'
-      : side === 'short'
-        ? 'border-down/30 bg-down/10 text-down'
-        : 'border-border bg-muted/40 text-muted-foreground'
+    let disposed = false
+    const controller = new AbortController()
+    const timer = window.setTimeout(async () => {
+      setSearching(true)
+      setSearchError(null)
 
-  const modeTone = (mode: string) =>
-    mode === '监控'
-      ? 'text-up'
-      : mode === '实盘'
-        ? 'text-[var(--chart-2)]'
-        : 'text-muted-foreground'
+      try {
+        const response = await fetch(`/api/market/search?q=${encodeURIComponent(normalized)}`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+        if (!response.ok) throw new Error(`搜索接口 HTTP ${response.status}`)
+        const payload = (await response.json()) as { ok: boolean; pairs?: TradingPair[]; error?: string }
+        if (disposed) return
+        setSearchResults(payload.pairs ?? [])
+        setSearchError(payload.ok ? null : payload.error ?? 'OKX 搜索不可用')
+      } catch (error) {
+        if (disposed || (error instanceof DOMException && error.name === 'AbortError')) return
+        setSearchError(error instanceof Error ? error.message : 'OKX 搜索不可用')
+      } finally {
+        if (!disposed) setSearching(false)
+      }
+    }, 250)
 
-  const getMaxInfoHeight = () => {
+    return () => {
+      disposed = true
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [query])
+
+  const getInfoPanelBounds = () => {
     const sidebarHeight = sidebarRef.current?.getBoundingClientRect().height ?? 0
-    if (!sidebarHeight) return INFO_PANEL_FALLBACK_HEIGHT
-    return Math.max(INFO_PANEL_MIN_HEIGHT, sidebarHeight - PAIR_LIST_MIN_VISIBLE_HEIGHT)
+    if (!sidebarHeight) return { min: INFO_PANEL_FALLBACK_HEIGHT, max: INFO_PANEL_FALLBACK_HEIGHT }
+
+    const panelMin = sidebarHeight - PAIR_LIST_HEADER_HEIGHT - PAIR_ROW_HEIGHT * PAIRS_VISIBLE_WHEN_PANEL_MIN
+    const panelMax = sidebarHeight - PAIR_LIST_HEADER_HEIGHT - PAIR_ROW_HEIGHT * PAIRS_VISIBLE_WHEN_PANEL_MAX
+    return {
+      min: Math.max(96, Math.min(panelMin, panelMax)),
+      max: Math.max(96, Math.max(panelMin, panelMax)),
+    }
   }
 
   const getDefaultInfoHeight = () => {
     const sidebarHeight = sidebarRef.current?.getBoundingClientRect().height ?? 0
+    const { min, max } = getInfoPanelBounds()
     if (!sidebarHeight) return INFO_PANEL_FALLBACK_HEIGHT
-    return clamp(Math.round(sidebarHeight * INFO_PANEL_DEFAULT_RATIO), INFO_PANEL_MIN_HEIGHT, getMaxInfoHeight())
+    return clamp(Math.round(sidebarHeight * INFO_PANEL_DEFAULT_RATIO), min, max)
   }
 
   useEffect(() => {
@@ -101,8 +143,9 @@ export function LeftSidebar({
 
     const syncPanelHeight = () => {
       setInfoHeight((height) => {
+        const { min, max } = getInfoPanelBounds()
         if (height == null || !userResizedRef.current) return getDefaultInfoHeight()
-        return clamp(height, INFO_PANEL_MIN_HEIGHT, getMaxInfoHeight())
+        return clamp(height, min, max)
       })
     }
 
@@ -124,7 +167,8 @@ export function LeftSidebar({
     event.preventDefault()
     const delta = dragRef.current.startY - event.clientY
     const nextHeight = dragRef.current.startHeight + delta
-    setInfoHeight(clamp(nextHeight, INFO_PANEL_MIN_HEIGHT, getMaxInfoHeight()))
+    const { min, max } = getInfoPanelBounds()
+    setInfoHeight(clamp(nextHeight, min, max))
   }
 
   const stopResize = (event: React.PointerEvent<HTMLButtonElement>) => {
@@ -154,7 +198,7 @@ export function LeftSidebar({
           <span>最新价 / 24h</span>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-          {pairs.map((p) => {
+          {filteredPairs.map((p) => {
             const positive = p.change >= 0
             const active = p.symbol === activeSymbol
             return (
@@ -191,6 +235,49 @@ export function LeftSidebar({
               </button>
             )
           })}
+          {filteredPairs.length === 0 && (
+            <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+              {loading ? '正在加载行情' : '没有匹配的交易对'}
+            </div>
+          )}
+          {(externalResults.length > 0 || searching || searchError) && (
+            <div className="border-t border-border/70">
+              <div className="flex items-center justify-between px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+                <span>OKX 合约</span>
+                {searching && <LoaderCircle className="size-3 animate-spin" />}
+              </div>
+              {externalResults.map((pair) => {
+                const positive = pair.change >= 0
+                return (
+                  <button
+                    key={pair.instrumentId}
+                    type="button"
+                    onClick={() => onAddPair(pair)}
+                    className="group flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/50"
+                  >
+                    <span className="flex size-5 shrink-0 items-center justify-center rounded border border-border text-muted-foreground group-hover:border-primary group-hover:text-primary">
+                      <Plus className="size-3.5" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-xs font-medium">
+                        {pair.base}
+                        <span className="text-muted-foreground">/{pair.quote}</span>
+                      </div>
+                      <div className="text-[10px] text-muted-foreground">Vol {pair.volume}</div>
+                    </div>
+                    <div className="w-[74px] shrink-0 text-right">
+                      <div className="font-mono text-xs tabular-nums">{formatPrice(pair.price)}</div>
+                      <div className={cn('font-mono text-[10px] tabular-nums', positive ? 'text-up' : 'text-down')}>
+                        {positive ? '+' : ''}
+                        {pair.change.toFixed(2)}%
+                      </div>
+                    </div>
+                  </button>
+                )
+              })}
+              {searchError && <div className="px-3 py-2 text-xs text-[var(--chart-3)]">{searchError}</div>}
+            </div>
+          )}
         </div>
       </div>
 
@@ -199,8 +286,8 @@ export function LeftSidebar({
         role="separator"
         aria-label="调整左侧情报面板高度"
         aria-orientation="horizontal"
-        aria-valuemin={INFO_PANEL_MIN_HEIGHT}
-        aria-valuemax={Math.round(getMaxInfoHeight())}
+        aria-valuemin={Math.round(getInfoPanelBounds().min)}
+        aria-valuemax={Math.round(getInfoPanelBounds().max)}
         aria-valuenow={Math.round(infoHeight ?? getDefaultInfoHeight())}
         onPointerDown={startResize}
         onPointerMove={resizePanel}
@@ -212,7 +299,7 @@ export function LeftSidebar({
       </button>
 
       <div className="flex shrink-0 flex-col" style={{ height: infoHeight ?? '50%' }}>
-        <div className="grid h-9 grid-cols-4 border-b border-border">
+        <div className="grid h-9 grid-cols-3 border-b border-border">
           {infoTabs.map((tab) => {
             const Icon = tab.icon
             const selected = infoTab === tab.id
@@ -234,102 +321,24 @@ export function LeftSidebar({
         </div>
 
         <div className="min-h-0 flex-1 overflow-hidden">
-          {infoTab === 'funding' && (
-            <div className="h-full">
-              <SectionTitle
-                icon={<Percent className="size-3.5" />}
-                title="资金费率"
-                extra={<span className="font-mono text-[10px] text-muted-foreground">下次 02:14:08</span>}
-              />
-              <div className="grid grid-cols-3 gap-px bg-border/50 px-3 pb-3">
-                {FUNDING_RATES.map((f) => {
-                  const positive = f.rate >= 0
-                  return (
-                    <div key={f.symbol} className="flex flex-col gap-0.5 bg-sidebar px-2 py-1.5">
-                      <span className="text-[10px] text-muted-foreground">{f.symbol}</span>
-                      <span className={cn('font-mono text-xs tabular-nums', positive ? 'text-up' : 'text-down')}>
-                        {positive ? '+' : ''}
-                        {f.rate.toFixed(4)}%
-                      </span>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
           {infoTab === 'signals' && (
             <div className="h-full overflow-y-auto scrollbar-thin">
               <SectionTitle icon={<Activity className="size-3.5" />} title="策略信号" />
-              <div className="space-y-1.5 px-3 pb-3">
-                {SIGNALS.map((signal) => (
-                  <button
-                    key={signal.id}
-                    onClick={() => onSelect(signal.symbol)}
-                    className="flex w-full items-center gap-2 rounded border border-border/70 bg-background/35 px-2 py-1.5 text-left leading-none transition-colors hover:border-ring"
-                  >
-                    <span className={cn('inline-flex h-5 w-12 items-center justify-center rounded border px-1.5 font-mono text-[10px]', signalTone(signal.side))}>
-                      {signal.side.toUpperCase()}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-mono text-[11px]">{signal.symbol}</div>
-                      <div className="truncate text-[10px] text-muted-foreground">{signal.source}</div>
-                    </div>
-                    <div className="text-right font-mono">
-                      <div className="text-[11px] tabular-nums">{signal.confidence}%</div>
-                      <div className="text-[10px] text-muted-foreground">{signal.age}</div>
-                    </div>
-                  </button>
-                ))}
-              </div>
+              <EmptyState label="暂无真实策略信号" />
             </div>
           )}
 
           {infoTab === 'strategies' && (
             <div className="h-full overflow-y-auto scrollbar-thin">
               <SectionTitle icon={<Bot className="size-3.5" />} title="策略实例" />
-              <div className="space-y-2 px-3 pb-3">
-                {STRATEGIES.map((strategy) => (
-                  <div key={strategy.id} className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 text-xs">
-                    <div className="min-w-0">
-                      <div className="truncate font-medium">{strategy.name}</div>
-                      <div className="font-mono text-[10px] text-muted-foreground">
-                        {strategy.symbol} · {strategy.timeframe}
-                      </div>
-                    </div>
-                    <div className={cn('font-mono text-[11px]', modeTone(strategy.mode))}>{strategy.mode}</div>
-                    <div className="font-mono text-[10px] text-muted-foreground">Win {strategy.winRate.toFixed(1)}%</div>
-                    <div className="font-mono text-[10px] text-muted-foreground">DD {strategy.maxDrawdown.toFixed(1)}%</div>
-                  </div>
-                ))}
-              </div>
+              <EmptyState label="暂无 freqtrade 策略实例" />
             </div>
           )}
 
           {infoTab === 'news' && (
             <div className="h-full overflow-y-auto scrollbar-thin">
               <SectionTitle icon={<Newspaper className="size-3.5" />} title="最近新闻" />
-              <ul className="flex flex-col gap-2.5 px-3 pb-3">
-                {NEWS.map((n) => (
-                  <li key={n.id} className="group cursor-pointer border-b border-border/50 pb-2.5 last:border-0">
-                    <div className="mb-1 flex items-center gap-2">
-                      <span
-                        className={cn(
-                          'rounded border px-1 py-px text-[9px] font-medium',
-                          tagColor(n.tag),
-                        )}
-                      >
-                        {n.tag}
-                      </span>
-                      <span className="text-[10px] text-muted-foreground">{n.source}</span>
-                      <span className="ml-auto text-[10px] text-muted-foreground">{n.time}</span>
-                    </div>
-                    <p className="text-xs leading-relaxed text-foreground/90 transition-colors group-hover:text-primary">
-                      {n.title}
-                    </p>
-                  </li>
-                ))}
-              </ul>
+              <EmptyState label="暂无真实新闻流" />
             </div>
           )}
         </div>

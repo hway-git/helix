@@ -22,8 +22,8 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: 'up
 
 export function SymbolHeader({ pair }: { pair: TradingPair }) {
   const positive = pair.change >= 0
-  const high = pair.price * (1 + Math.abs(pair.change) / 100 + 0.004)
-  const low = pair.price * (1 - Math.abs(pair.change) / 100 - 0.004)
+  const market = pair.market.toUpperCase()
+  const contractLabel = pair.contractType === 'perpetual' ? '永续' : '现货'
 
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-3 border-b border-border bg-card/40 px-4 py-3">
@@ -36,10 +36,12 @@ export function SymbolHeader({ pair }: { pair: TradingPair }) {
             {pair.base}
             <span className="text-muted-foreground">/{pair.quote}</span>
             <span className="inline-flex h-5 items-center rounded bg-muted px-1.5 text-[10px] font-normal text-muted-foreground">
-              永续
+              {contractLabel}
             </span>
           </div>
-          <div className="text-[11px] text-muted-foreground">模拟行情 · 全仓视图</div>
+          <div className="text-[11px] text-muted-foreground">
+            {market} · {pair.instrumentId}
+          </div>
         </div>
       </div>
 
@@ -54,11 +56,11 @@ export function SymbolHeader({ pair }: { pair: TradingPair }) {
       </div>
 
       <div className="ml-auto flex items-center gap-6">
-        <Stat label="24h 最高" value={formatPrice(high)} tone="up" />
-        <Stat label="24h 最低" value={formatPrice(low)} tone="down" />
+        <Stat label="24h 最高" value={pair.high24h == null ? '--' : formatPrice(pair.high24h)} tone="up" />
+        <Stat label="24h 最低" value={pair.low24h == null ? '--' : formatPrice(pair.low24h)} tone="down" />
         <Stat label="24h 量" value={pair.volume} />
-        <Stat label="资金费率" value="+0.0104%" tone="up" />
-        <Stat label="数据源" value="DEMO" />
+        <Stat label="资金费率" value="--" />
+        <Stat label="数据源" value={pair.stale ? 'STALE' : market} />
       </div>
     </div>
   )

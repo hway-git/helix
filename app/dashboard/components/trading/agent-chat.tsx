@@ -31,25 +31,13 @@ const INITIAL: Message[] = [
   {
     id: 'm1',
     role: 'agent',
-    content: '当前为演示控制台。真实模式会先读取行情、策略和风控结果，再生成交易预览。',
-    time: '09:41',
-  },
-  {
-    id: 'm2',
-    role: 'user',
-    content: 'Trend Rider 的 BTC 信号能执行吗？',
-    time: '09:42',
-  },
-  {
-    id: 'm3',
-    role: 'agent',
-    content: '暂不执行。实盘开关锁定，且当前没有后端 preview_id。可以先完成回测验证，再走授权流程。',
-    time: '09:42',
+    content: '行情已接入 OKX。账户、策略和执行链路尚未连接，当前保持只读与实盘锁定。',
+    time: '--:--',
   },
 ]
 
 const panels: Array<{ id: Panel; label: string; icon: React.ElementType }> = [
-  { id: 'agent', label: 'Agent', icon: Bot },
+  { id: 'agent', label: '助手', icon: Bot },
   { id: 'risk', label: '风控', icon: ShieldCheck },
   { id: 'execution', label: '执行', icon: ClipboardList },
 ]
@@ -60,7 +48,7 @@ const suggestions = [
   { icon: Newspaper, label: '汇总今日事件' },
 ]
 
-const cannedReply = '已记录为演示请求。生产接入后会以真实行情、回测结果和风控策略为准，当前不会触发下单。'
+const cannedReply = '当前只读模式不会触发下单。涉及账户、策略或执行的问题，需要等对应后端接口接入后再生成真实预览。'
 
 function now() {
   return new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
@@ -94,19 +82,19 @@ function Metric({
 
 function RiskPanel() {
   const rules = [
-    ['单笔风险', '<= 0.50%', '通过'],
-    ['日内亏损', '<= 2.00%', '通过'],
-    ['最大持仓', '3 / 5', '通过'],
+    ['账户连接', '--', '未连接'],
+    ['策略预览', '--', '未连接'],
+    ['审计流水', '--', '待接入'],
     ['实盘开关', 'Locked', '锁定'],
   ]
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin p-3">
       <div className="grid grid-cols-2 gap-2">
-        <Metric label="Risk Score" value="18 / 100" tone="up" />
-        <Metric label="Exposure" value="31.4%" />
-        <Metric label="Daily PnL" value="+2.84%" tone="up" />
-        <Metric label="Auto Trade" value="OFF" tone="down" />
+        <Metric label="Risk Score" value="--" />
+        <Metric label="Exposure" value="--" />
+        <Metric label="Daily PnL" value="--" />
+        <Metric label="Auto Trade" value="LOCKED" tone="down" />
       </div>
 
       <div className="mt-3 rounded border border-border bg-background/35">
@@ -119,7 +107,7 @@ function RiskPanel() {
             <div key={name} className="grid grid-cols-[1fr_auto_auto] items-center gap-3 px-3 py-2 text-xs">
               <span>{name}</span>
               <span className="font-mono text-muted-foreground">{value}</span>
-              <span className={cn('font-mono text-[11px]', state === '锁定' ? 'text-down' : 'text-up')}>
+              <span className={cn('font-mono text-[11px]', state === '锁定' ? 'text-down' : 'text-muted-foreground')}>
                 {state}
               </span>
             </div>
@@ -150,9 +138,9 @@ function ExecutionPanel() {
         </div>
         <div className="space-y-2 px-3 py-3 text-xs">
           {[
-            ['Strategy', 'Trend Rider 15m'],
-            ['Symbol', 'BTC/USDT'],
-            ['Intent', 'Long · 0.36R'],
+            ['Strategy', 'Not connected'],
+            ['Symbol', '--'],
+            ['Intent', '--'],
             ['Mode', 'Live locked'],
             ['Preview ID', 'Missing'],
           ].map(([label, value]) => (
@@ -252,7 +240,7 @@ function AgentPanel({
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
             rows={1}
-            placeholder="向 Agent 提问..."
+            placeholder="向 Helix 助手提问..."
             className="max-h-28 min-h-[24px] flex-1 resize-none bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
           />
           <button
@@ -341,7 +329,7 @@ export function AgentChat({
           })}
         </div>
 
-        <div className="mb-1 mt-auto h-1.5 w-1.5 rounded-full bg-up" />
+        <div className="mb-1 mt-auto h-1.5 w-1.5 rounded-full bg-muted-foreground" />
       </aside>
     )
   }
@@ -349,18 +337,18 @@ export function AgentChat({
   return (
     <aside className="flex h-full flex-col overflow-hidden bg-sidebar">
       <header className="flex items-center gap-2.5 border-b border-border px-4 py-3">
-        <div className="relative flex size-8 items-center justify-center rounded bg-primary/15">
-          <Bot className="size-4 text-primary" />
+        <div className="relative flex size-8 items-center justify-center overflow-hidden rounded bg-primary/15 ring-1 ring-primary/20">
+          <img src="/helix-ai-avatar.png" alt="" className="size-8 object-cover" />
           <CheckCircle2 className="absolute -right-1 -top-1 size-3.5 rounded-full bg-sidebar text-up" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 text-sm font-semibold leading-none">
-            交易助手
+            Helix 助手
             <Sparkles className="size-3 text-primary" />
           </div>
           <div className="mt-1.5 flex items-center gap-1.5 font-mono text-[10px] leading-none">
             <span className="inline-flex h-5 items-center rounded border border-up/30 bg-up/10 px-1.5 text-up">
-              风控在线
+              只读模式
             </span>
             <span className="inline-flex h-5 items-center rounded border border-down/30 bg-down/10 px-1.5 text-down">
               实盘锁定

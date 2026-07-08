@@ -3,11 +3,7 @@
 import { useEffect, useRef } from 'react'
 import { createChart, type HistogramData, type LineData, type Time } from 'lightweight-charts'
 import type { MacdPoint } from '@/lib/market-data'
-import { baseChartOptions, chartColors } from './lightweight-utils'
-
-function macdTime(index: number): Time {
-  return (index + 1) as Time
-}
+import { baseChartOptions, chartColors, chartTime } from './lightweight-utils'
 
 export function MACDChart({ points }: { points: MacdPoint[] }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -42,17 +38,17 @@ export function MACDChart({ points }: { points: MacdPoint[] }) {
       lastValueVisible: false,
     })
 
-    const histogramData: HistogramData<Time>[] = points.map((point, index) => ({
-      time: macdTime(index),
+    const histogramData: HistogramData<Time>[] = points.map((point) => ({
+      time: chartTime(point.time),
       value: point.hist,
       color: point.hist >= 0 ? colors.up : colors.down,
     }))
-    const macdData: LineData<Time>[] = points.map((point, index) => ({
-      time: macdTime(index),
+    const macdData: LineData<Time>[] = points.map((point) => ({
+      time: chartTime(point.time),
       value: point.macd,
     }))
-    const signalData: LineData<Time>[] = points.map((point, index) => ({
-      time: macdTime(index),
+    const signalData: LineData<Time>[] = points.map((point) => ({
+      time: chartTime(point.time),
       value: point.signal,
     }))
 

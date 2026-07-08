@@ -37,10 +37,10 @@ export function IndicatorCard({
         )}
         {readout && <div className="ml-1 flex items-center gap-3 font-mono text-[11px]">{readout}</div>}
         <div className="ml-auto flex items-center gap-0.5">
-          <IconBtn label="上移" disabled={!canMoveUp} onClick={onMoveUp}>
+          <IconBtn label="上一个指标" disabled={!canMoveUp} onClick={onMoveUp}>
             <ChevronUp className="size-3.5" />
           </IconBtn>
-          <IconBtn label="下移" disabled={!canMoveDown} onClick={onMoveDown}>
+          <IconBtn label="下一个指标" disabled={!canMoveDown} onClick={onMoveDown}>
             <ChevronDown className="size-3.5" />
           </IconBtn>
           <IconBtn label="全屏">

@@ -15,6 +15,7 @@ export function chartColors() {
     down: '#ef4444',
     accent: '#38bdf8',
     warning: '#eab308',
+    mondayLow: '#a78bfa',
   }
 }
 
@@ -47,10 +48,10 @@ export function baseChartOptions(): DeepPartial<ChartOptions> {
       borderColor: colors.border,
       timeVisible: true,
       secondsVisible: false,
-      rightOffset: 4,
-      barSpacing: 6,
-      fixLeftEdge: true,
-      fixRightEdge: true,
+      rightOffset: 8,
+      barSpacing: 8,
+      fixLeftEdge: false,
+      fixRightEdge: false,
     },
     handleScroll: {
       mouseWheel: true,

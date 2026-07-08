@@ -24,23 +24,9 @@ const tabs: Array<{ id: TabId; label: string; icon: React.ElementType }> = [
   { id: 'audit', label: '审计', icon: History },
 ]
 
-const positions: TableRow[] = [
-  { symbol: 'BTC/USDT', side: 'Long', size: '0.42 BTC', entry: '63,180.5', mark: '64,218.5', pnl: '+436.0', risk: '0.36R' },
-  { symbol: 'ETH/USDT', side: 'Long', size: '3.20 ETH', entry: '3,101.7', mark: '3,142.9', pnl: '+131.8', risk: '0.22R' },
-  { symbol: 'SOL/USDT', side: 'Short', size: '80 SOL', entry: '151.4', mark: '148.2', pnl: '+256.0', risk: '0.31R' },
-]
-
-const orders: TableRow[] = [
-  { id: 'O-1942', symbol: 'BTC/USDT', type: 'Stop Market', side: 'Sell', price: '62,400.0', status: '已提交' },
-  { id: 'O-1943', symbol: 'ETH/USDT', type: 'Limit', side: 'Buy', price: '3,068.0', status: '等待成交' },
-  { id: 'O-1944', symbol: 'SOL/USDT', type: 'Take Profit', side: 'Buy', price: '144.8', status: '等待触发' },
-]
-
-const backtests: TableRow[] = [
-  { strategy: 'Trend Rider', range: '2025-01-01 / 2026-06-30', trades: 186, win: '58.4%', sharpe: '1.72', dd: '7.8%' },
-  { strategy: 'Mean Revert', range: '2025-07-01 / 2026-06-30', trades: 92, win: '54.1%', sharpe: '1.18', dd: '5.2%' },
-  { strategy: 'Breakout Scalper', range: '2026-01-01 / 2026-06-30', trades: 268, win: '49.6%', sharpe: '0.86', dd: '11.3%' },
-]
+const positions: TableRow[] = []
+const orders: TableRow[] = []
+const backtests: TableRow[] = []
 
 const riskRules: TableRow[] = [
   { rule: '单笔风险', value: '0.50%', state: '正常' },
@@ -49,19 +35,21 @@ const riskRules: TableRow[] = [
   { rule: '实盘开关', value: 'Locked', state: '锁定' },
 ]
 
-const audit: TableRow[] = [
-  { time: '09:42:18', actor: 'Agent', event: '生成 BTC/USDT 入场预览', result: '等待确认' },
-  { time: '09:41:02', actor: 'Risk', event: '检查日内亏损阈值', result: '通过' },
-  { time: '09:39:56', actor: 'Backtest', event: 'Trend Rider 15m 回测完成', result: '通过' },
-]
+const audit: TableRow[] = []
 
 function DataTable({
   columns,
   rows,
+  emptyLabel,
 }: {
   columns: string[]
   rows: TableRow[]
+  emptyLabel: string
 }) {
+  if (rows.length === 0) {
+    return <div className="flex h-full items-center justify-center text-xs text-muted-foreground">{emptyLabel}</div>
+  }
+
   return (
     <div className="h-full overflow-auto scrollbar-thin">
       <table className="w-full min-w-[720px] border-separate border-spacing-0 text-left text-xs">
@@ -108,6 +96,7 @@ function renderPanel(active: TabId) {
       <DataTable
         columns={['symbol', 'side', 'size', 'entry', 'mark', 'pnl', 'risk']}
         rows={positions}
+        emptyLabel="暂无真实持仓数据"
       />
     )
   }
@@ -116,6 +105,7 @@ function renderPanel(active: TabId) {
       <DataTable
         columns={['id', 'symbol', 'type', 'side', 'price', 'status']}
         rows={orders}
+        emptyLabel="暂无真实订单数据"
       />
     )
   }
@@ -124,6 +114,7 @@ function renderPanel(active: TabId) {
       <DataTable
         columns={['strategy', 'range', 'trades', 'win', 'sharpe', 'dd']}
         rows={backtests}
+        emptyLabel="暂无真实回测结果"
       />
     )
   }
@@ -132,6 +123,7 @@ function renderPanel(active: TabId) {
       <DataTable
         columns={['rule', 'value', 'state']}
         rows={riskRules}
+        emptyLabel="暂无风控规则"
       />
     )
   }
@@ -139,6 +131,7 @@ function renderPanel(active: TabId) {
     <DataTable
       columns={['time', 'actor', 'event', 'result']}
       rows={audit}
+      emptyLabel="暂无审计事件"
     />
   )
 }
@@ -146,6 +139,16 @@ function renderPanel(active: TabId) {
 export function BottomWorkbench() {
   const [active, setActive] = useState<TabId>('positions')
   const [collapsed, setCollapsed] = useState(false)
+
+  const selectTab = (tab: TabId) => {
+    if (tab === active) {
+      setCollapsed((value) => !value)
+      return
+    }
+
+    setActive(tab)
+    setCollapsed(false)
+  }
 
   return (
     <section
@@ -162,10 +165,9 @@ export function BottomWorkbench() {
             return (
               <button
                 key={tab.id}
-                onClick={() => {
-                  setActive(tab.id)
-                  if (collapsed) setCollapsed(false)
-                }}
+                onClick={() => selectTab(tab.id)}
+                aria-expanded={selected ? !collapsed : undefined}
+                title={selected ? (collapsed ? `展开${tab.label}` : `收起${tab.label}`) : `打开${tab.label}`}
                 className={cn(
                   'inline-flex h-full items-center gap-1.5 border-r border-border px-3 text-xs leading-none transition-colors [&_svg]:shrink-0',
                   selected ? 'bg-background text-foreground' : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground',
@@ -173,24 +175,20 @@ export function BottomWorkbench() {
               >
                 <Icon className="size-3.5" />
                 {tab.label}
+                {selected && (
+                  <span className="ml-1 text-muted-foreground">
+                    {collapsed ? <PanelBottomOpen className="size-3.5" /> : <PanelBottomClose className="size-3.5" />}
+                  </span>
+                )}
               </button>
             )
           })}
         </div>
-        <div className="flex items-center gap-2 px-2">
+        <div className="flex items-center gap-2 px-3">
           <div className="hidden items-center gap-2 font-mono text-[10px] leading-none text-muted-foreground sm:flex">
-            <ListChecks className="size-3.5 text-up" />
-            EVENT_LOG_SYNCED
+            <ListChecks className="size-3.5 text-muted-foreground" />
+            ACCOUNT_OFFLINE
           </div>
-          <button
-            type="button"
-            aria-label={collapsed ? '展开底部控制台' : '收起底部控制台'}
-            title={collapsed ? '展开底部控制台' : '收起底部控制台'}
-            onClick={() => setCollapsed((value) => !value)}
-            className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            {collapsed ? <PanelBottomOpen className="size-4" /> : <PanelBottomClose className="size-4" />}
-          </button>
         </div>
       </div>
       {!collapsed && <div className="min-h-0 flex-1">{renderPanel(active)}</div>}

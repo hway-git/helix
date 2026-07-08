@@ -1,19 +1,14 @@
 'use client'
 
-import { useMemo, useState } from 'react'
-import { Check, Database, Plus } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Check, Percent, Plus } from 'lucide-react'
 import { IndicatorCard } from './indicator-card'
 import { SymbolHeader } from './symbol-header'
 import { CandlestickChart } from '@/components/charts/candlestick-chart'
-import { RSIChart } from '@/components/charts/rsi-chart'
 import { MACDChart } from '@/components/charts/macd-chart'
+import { RSIChart } from '@/components/charts/rsi-chart'
 import { VolumeChart } from '@/components/charts/volume-chart'
-import {
-  generateCandles,
-  computeRSI,
-  computeMACD,
-  TRADING_PAIRS,
-} from '@/lib/market-data'
+import { type Candle, type MarketLevels, type TechnicalIndicators, type TradingPair } from '@/lib/market-data'
 import { cn } from '@/lib/utils'
 
 type IndicatorType = 'rsi' | 'macd' | 'volume'
@@ -21,89 +16,147 @@ type IndicatorType = 'rsi' | 'macd' | 'volume'
 const TIMEFRAMES = ['1m', '5m', '15m', '1H', '4H', '1D']
 
 const META: Record<IndicatorType, { title: string; badge: string; height: string }> = {
-  rsi: { title: 'RSI 相对强弱指标', badge: 'RSI · 14', height: 'h-40' },
-  macd: { title: 'MACD 指数平滑异同', badge: '12 · 26 · 9', height: 'h-44' },
-  volume: { title: '成交量', badge: 'Volume', height: 'h-36' },
+  rsi: { title: 'RSI 相对强弱', badge: 'RSI · Freqtrade', height: 'h-32' },
+  macd: { title: 'MACD 指数平滑异同', badge: 'MACD · Freqtrade', height: 'h-32' },
+  volume: { title: '成交量', badge: 'Volume', height: 'h-32' },
 }
 
-export function CenterPanel({ activeSymbol }: { activeSymbol: string }) {
-  const [indicators, setIndicators] = useState<IndicatorType[]>(['rsi', 'macd'])
-  const [timeframe, setTimeframe] = useState('15m')
+function IndicatorEmptyState({ loading, message }: { loading: boolean; message: string }) {
+  return (
+    <div className="flex h-full items-center justify-center px-3 text-center text-xs text-muted-foreground">
+      {loading ? '正在加载指标' : message}
+    </div>
+  )
+}
+
+function fundingRateLabel(rate?: number) {
+  if (rate == null) return '--'
+  return `${(rate * 100).toFixed(4)}%`
+}
+
+function fundingTimeLabel(time?: number) {
+  if (!time) return null
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(time))
+}
+
+function FundingRateChip({ pair }: { pair: TradingPair }) {
+  const nextFundingTime = fundingTimeLabel(pair.nextFundingTime)
+  const tone = pair.fundingRate == null ? 'text-muted-foreground' : pair.fundingRate >= 0 ? 'text-up' : 'text-down'
+
+  return (
+    <div className="hidden h-7 items-center gap-1.5 rounded border border-border bg-background/40 px-2 font-mono text-[11px] leading-none md:inline-flex [&_svg]:shrink-0">
+      <Percent className="size-3.5 text-muted-foreground" />
+      <span className="text-muted-foreground">资金</span>
+      <span className={tone}>{fundingRateLabel(pair.fundingRate)}</span>
+      {nextFundingTime && <span className="text-muted-foreground">下次 {nextFundingTime}</span>}
+    </div>
+  )
+}
+
+export function CenterPanel({
+  pair,
+  candles,
+  timeframe,
+  loading,
+  error,
+  levels,
+  indicators: technicalIndicators,
+  indicatorLoading,
+  indicatorError,
+  onTimeframeChange,
+}: {
+  pair: TradingPair
+  candles: Candle[]
+  timeframe: string
+  loading: boolean
+  error: string | null
+  levels?: MarketLevels
+  indicators?: TechnicalIndicators
+  indicatorLoading: boolean
+  indicatorError: string | null
+  onTimeframeChange: (timeframe: string) => void
+}) {
+  const [indicators, setIndicators] = useState<IndicatorType[]>(['rsi', 'macd', 'volume'])
+  const [activeIndicatorIndex, setActiveIndicatorIndex] = useState(0)
+  const [showEma20, setShowEma20] = useState(true)
   const [menuOpen, setMenuOpen] = useState(false)
 
-  const pair = TRADING_PAIRS.find((p) => p.symbol === activeSymbol) ?? TRADING_PAIRS[0]
+  useEffect(() => {
+    setActiveIndicatorIndex((index) => Math.min(index, Math.max(indicators.length - 1, 0)))
+  }, [indicators.length])
 
-  // 基于交易对生成可复现数据
-  const seed = useMemo(
-    () => pair.symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0),
-    [pair.symbol],
-  )
-  const candles = useMemo(() => generateCandles(90, seed, pair.price), [seed, pair.price])
-  const rsi = useMemo(() => computeRSI(candles), [candles])
-  const macd = useMemo(() => computeMACD(candles), [candles])
-
-  const lastRsi = rsi[rsi.length - 1]
-  const lastMacd = macd[macd.length - 1]
-
-  const move = (index: number, dir: -1 | 1) => {
-    setIndicators((prev) => {
-      const next = [...prev]
-      const target = index + dir
-      if (target < 0 || target >= next.length) return prev
-      ;[next[index], next[target]] = [next[target], next[index]]
-      return next
-    })
-  }
-
-  const remove = (index: number) => setIndicators((prev) => prev.filter((_, i) => i !== index))
+  const showPreviousIndicator = () => setActiveIndicatorIndex((index) => Math.max(index - 1, 0))
+  const showNextIndicator = () => setActiveIndicatorIndex((index) => Math.min(index + 1, indicators.length - 1))
+  const removeActiveIndicator = () => setIndicators((prev) => prev.filter((_, i) => i !== activeIndicatorIndex))
   const add = (type: IndicatorType) => {
-    setIndicators((prev) => (prev.includes(type) ? prev : [...prev, type]))
+    const existingIndex = indicators.indexOf(type)
+    if (existingIndex >= 0) {
+      setActiveIndicatorIndex(existingIndex)
+    } else {
+      setIndicators((prev) => [...prev, type])
+      setActiveIndicatorIndex(indicators.length)
+    }
     setMenuOpen(false)
   }
 
   const renderChart = (type: IndicatorType) => {
     switch (type) {
       case 'rsi':
-        return <RSIChart values={rsi} />
+        return technicalIndicators?.rsi.length ? (
+          <RSIChart points={technicalIndicators.rsi} />
+        ) : (
+          <IndicatorEmptyState loading={indicatorLoading} message={indicatorError || '当前策略未输出 RSI'} />
+        )
       case 'macd':
-        return <MACDChart points={macd} />
+        return technicalIndicators?.macd.length ? (
+          <MACDChart points={technicalIndicators.macd} />
+        ) : (
+          <IndicatorEmptyState loading={indicatorLoading} message={indicatorError || '当前策略未输出 MACD'} />
+        )
       case 'volume':
         return <VolumeChart candles={candles} />
     }
   }
 
   const readout = (type: IndicatorType): React.ReactNode => {
-    if (type === 'rsi' && !Number.isNaN(lastRsi)) {
-      const tone = lastRsi >= 70 ? 'text-down' : lastRsi <= 30 ? 'text-up' : 'text-foreground'
-      return <span className={tone}>{lastRsi.toFixed(1)}</span>
+    if (type === 'rsi') {
+      const latest = technicalIndicators?.rsi.at(-1)?.value
+      return latest == null ? null : <span>RSI {latest.toFixed(1)}</span>
     }
-    if (type === 'macd' && lastMacd) {
+    if (type === 'macd') {
+      const latest = technicalIndicators?.macd.at(-1)
+      if (!latest) return null
       return (
         <>
-          <span className="text-[var(--chart-2)]">DIF {lastMacd.macd.toFixed(1)}</span>
-          <span className="text-[var(--chart-3)]">DEA {lastMacd.signal.toFixed(1)}</span>
-          <span className={lastMacd.hist >= 0 ? 'text-up' : 'text-down'}>
-            MACD {lastMacd.hist.toFixed(1)}
-          </span>
+          <span className="text-[var(--chart-2)]">DIF {latest.macd.toFixed(2)}</span>
+          <span className="text-[var(--chart-3)]">DEA {latest.signal.toFixed(2)}</span>
+          <span className={latest.hist >= 0 ? 'text-up' : 'text-down'}>Hist {latest.hist.toFixed(2)}</span>
         </>
       )
     }
-    return null
+
+    const latestVolume = candles.at(-1)?.volume
+    return latestVolume == null ? null : <span>Vol {latestVolume.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>
   }
 
   const allTypes: IndicatorType[] = ['rsi', 'macd', 'volume']
+  const activeIndicator = indicators[activeIndicatorIndex]
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <SymbolHeader pair={pair} />
 
-      <div className="flex h-[392px] shrink-0 flex-col border-b border-border">
+      <div className="flex min-h-0 flex-1 flex-col border-b border-border">
         <div className="flex h-10 items-center gap-2 border-b border-border bg-card/20 px-4">
           <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5">
             {TIMEFRAMES.map((t) => (
               <button
                 key={t}
-                onClick={() => setTimeframe(t)}
+                onClick={() => onTimeframeChange(t)}
                 className={cn(
                   'inline-flex h-6 items-center justify-center rounded px-2 font-mono text-[11px] leading-none transition-colors',
                   timeframe === t
@@ -116,12 +169,7 @@ export function CenterPanel({ activeSymbol }: { activeSymbol: string }) {
             ))}
           </div>
 
-          <div className="hidden items-center gap-2 font-mono text-[11px] text-muted-foreground xl:flex">
-            <span className="inline-flex h-6 items-center gap-1 rounded border border-[var(--chart-3)]/40 bg-[var(--chart-3)]/10 px-2 leading-none text-[var(--chart-3)] [&_svg]:shrink-0">
-              <Database className="size-3.5" />
-              模拟 K 线
-            </span>
-          </div>
+          <FundingRateChip pair={pair} />
 
           <div className="relative ml-auto">
             <button
@@ -135,6 +183,17 @@ export function CenterPanel({ activeSymbol }: { activeSymbol: string }) {
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} aria-hidden="true" />
                 <div className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-md border border-border bg-popover py-1 shadow-xl">
+                  <button
+                    onClick={() => {
+                      setShowEma20((value) => !value)
+                      setMenuOpen(false)
+                    }}
+                    className="flex w-full items-center justify-between px-3 py-2 text-left text-xs transition-colors hover:bg-muted"
+                  >
+                    EMA20 趋势线
+                    {showEma20 && <Check className="size-3.5 text-primary" />}
+                  </button>
+                  <div className="my-1 h-px bg-border" />
                   {allTypes.map((t) => {
                     const enabled = indicators.includes(t)
                     return (
@@ -156,13 +215,24 @@ export function CenterPanel({ activeSymbol }: { activeSymbol: string }) {
         </div>
 
         <div className="relative min-h-0 flex-1 px-1 py-1">
-          <CandlestickChart candles={candles} />
+          {candles.length > 0 ? (
+            <CandlestickChart
+              candles={candles}
+              levels={levels}
+              rangeKey={`${pair.instrumentId}:${timeframe}`}
+              showEma20={showEma20}
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+              {loading ? '正在加载 K 线' : error ? 'K 线暂不可用' : '暂无 K 线数据'}
+            </div>
+          )}
         </div>
       </div>
 
-      {/* 可编辑指标卡片列表 */}
-      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin p-3">
-        {indicators.length === 0 ? (
+      {/* 单指标查看区：多指标通过卡片右上角箭头切换 */}
+      <div className="h-[190px] shrink-0 overflow-hidden p-2">
+        {!activeIndicator ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
             <p className="text-sm">暂无指标卡片</p>
             <button
@@ -173,24 +243,20 @@ export function CenterPanel({ activeSymbol }: { activeSymbol: string }) {
             </button>
           </div>
         ) : (
-          <div className="flex flex-col gap-3">
-            {indicators.map((type, i) => (
-              <IndicatorCard
-                key={type}
-                title={META[type].title}
-                badge={META[type].badge}
-                height={META[type].height}
-                readout={readout(type)}
-                canMoveUp={i > 0}
-                canMoveDown={i < indicators.length - 1}
-                onMoveUp={() => move(i, -1)}
-                onMoveDown={() => move(i, 1)}
-                onRemove={() => remove(i)}
-              >
-                {renderChart(type)}
-              </IndicatorCard>
-            ))}
-          </div>
+          <IndicatorCard
+            key={activeIndicator}
+            title={META[activeIndicator].title}
+            badge={`${META[activeIndicator].badge} · ${activeIndicatorIndex + 1}/${indicators.length}`}
+            height={META[activeIndicator].height}
+            readout={readout(activeIndicator)}
+            canMoveUp={activeIndicatorIndex > 0}
+            canMoveDown={activeIndicatorIndex < indicators.length - 1}
+            onMoveUp={showPreviousIndicator}
+            onMoveDown={showNextIndicator}
+            onRemove={removeActiveIndicator}
+          >
+            {renderChart(activeIndicator)}
+          </IndicatorCard>
         )}
       </div>
     </div>
