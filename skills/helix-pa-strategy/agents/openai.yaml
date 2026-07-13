@@ -1,0 +1,4 @@
+interface:
+  display_name: "Helix PA Strategy"
+  short_description: "Define deterministic Price Action setups"
+  default_prompt: "Use $helix-pa-strategy to define and validate a deterministic Price Action setup."

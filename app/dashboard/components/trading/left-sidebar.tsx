@@ -1,10 +1,26 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, BarChart3, Bot, LoaderCircle, Newspaper, Plus, RefreshCw, Search, Star } from 'lucide-react'
+import {
+  Activity,
+  ArrowDownRight,
+  ArrowUpRight,
+  BarChart3,
+  Bot,
+  Crosshair,
+  LoaderCircle,
+  Newspaper,
+  Plus,
+  RefreshCw,
+  Search,
+  Shield,
+  Star,
+} from 'lucide-react'
 import { Sparkline } from '@/components/charts/sparkline'
 import {
   formatPrice,
+  type IntradaySignalSnapshot,
+  type IntradayTimeframeAnalysis,
   type MacroDataPoint,
   type MacroSnapshot,
   type MarketNewsItem,
@@ -95,6 +111,165 @@ function macroChangeClass(change?: number) {
   return change > 0 ? 'text-[var(--chart-3)]' : 'text-[var(--chart-2)]'
 }
 
+const confidenceLabels = {
+  low: '低',
+  medium: '中',
+  high: '高',
+  'very-high': '很高',
+} as const
+
+function structureLabel(analysis: IntradayTimeframeAnalysis) {
+  const high = analysis.priceAction.structureHigh === 'higher'
+    ? 'HH'
+    : analysis.priceAction.structureHigh === 'lower'
+      ? 'LH'
+      : analysis.priceAction.structureHigh === 'equal'
+        ? 'EH'
+        : '--'
+  const low = analysis.priceAction.structureLow === 'higher'
+    ? 'HL'
+    : analysis.priceAction.structureLow === 'lower'
+      ? 'LL'
+      : analysis.priceAction.structureLow === 'equal'
+        ? 'EL'
+        : '--'
+  return `${high}/${low}`
+}
+
+function macdLabel(analysis: IntradayTimeframeAnalysis) {
+  if (analysis.macd.divergence === 'bullish') return '底背离'
+  if (analysis.macd.divergence === 'bearish') return '顶背离'
+  if (analysis.macd.cross === 'bullish') return '金叉'
+  if (analysis.macd.cross === 'bearish') return '死叉'
+  return analysis.macd.histogram > 0 ? '柱体 > 0' : analysis.macd.histogram < 0 ? '柱体 < 0' : '零轴'
+}
+
+function rsiLabel(analysis: IntradayTimeframeAnalysis) {
+  const state = analysis.rsi.state === 'overbought' ? '超买' : analysis.rsi.state === 'oversold' ? '超卖' : '中性'
+  return `${analysis.rsi.value.toFixed(1)} ${state}`
+}
+
+function paEventLabel(event: IntradayTimeframeAnalysis['priceAction']['event']) {
+  const labels: Record<IntradayTimeframeAnalysis['priceAction']['event'], string> = {
+    'bullish-break': '向上突破',
+    'bearish-break': '向下突破',
+    'bullish-retest': '多头回踩',
+    'bearish-retest': '空头回踩',
+    'bullish-rejection': '支撑拒绝',
+    'bearish-rejection': '阻力拒绝',
+    'bullish-sweep': '下扫收回',
+    'bearish-sweep': '上扫收回',
+    ambiguous: '柱内歧义',
+    none: '无事件',
+  }
+  return labels[event]
+}
+
+function SignalPanel({ snapshot }: { snapshot: IntradaySignalSnapshot }) {
+  const { signal } = snapshot
+  const actionable = signal.status === 'actionable'
+  const long = actionable && signal.side === 'long'
+  const short = actionable && signal.side === 'short'
+  const statusLabel = long ? 'LONG' : short ? 'SHORT' : 'WAIT'
+  const statusClass = long
+    ? 'text-[var(--chart-3)]'
+    : short
+      ? 'text-[var(--chart-2)]'
+      : 'text-muted-foreground'
+  const StatusIcon = long ? ArrowUpRight : short ? ArrowDownRight : Activity
+  const biasLabel = signal.bias.side === 'long' ? '1H 偏多' : signal.bias.side === 'short' ? '1H 偏空' : '1H 中性'
+
+  return (
+    <div className="divide-y divide-border/70">
+      <div className="px-3 py-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className={cn('inline-flex min-w-0 items-center gap-1.5 font-mono text-sm font-semibold leading-none', statusClass)}>
+            <StatusIcon className="size-4 shrink-0" />
+            <span>{statusLabel}</span>
+          </div>
+          <div className="text-right font-mono text-[11px] leading-none tabular-nums text-foreground">
+            {signal.confidence}% · {confidenceLabels[signal.confidenceLevel]}
+          </div>
+        </div>
+        <div className="mt-1.5 flex items-center justify-between gap-2 text-[10px] leading-4 text-muted-foreground">
+          <span>{snapshot.activeSymbol} · {biasLabel}</span>
+          <span>{new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(snapshot.generatedAt)}</span>
+        </div>
+      </div>
+
+      {actionable && signal.entry && signal.stopLoss && (
+        <div className="grid grid-cols-2 divide-x divide-border/70">
+          <div className="min-w-0 px-3 py-2">
+            <div className="flex items-center gap-1 text-[10px] leading-none text-muted-foreground">
+              <Crosshair className="size-3" />
+              建议入场 · {signal.entry.timeframe}
+            </div>
+            <div className="mt-1 font-mono text-xs font-medium tabular-nums text-foreground">
+              {formatPrice(signal.entry.price)}
+            </div>
+            <div className="mt-0.5 truncate font-mono text-[9px] tabular-nums text-muted-foreground">
+              {formatPrice(signal.entry.zoneLow)}–{formatPrice(signal.entry.zoneHigh)}
+            </div>
+          </div>
+          <div className="min-w-0 px-3 py-2">
+            <div className="flex items-center gap-1 text-[10px] leading-none text-muted-foreground">
+              <Shield className="size-3" />
+              结构止损
+            </div>
+            <div className="mt-1 font-mono text-xs font-medium tabular-nums text-[var(--chart-2)]">
+              {formatPrice(signal.stopLoss.price)}
+            </div>
+            <div className="mt-0.5 truncate text-[9px] leading-3 text-muted-foreground" title={signal.stopLoss.basis}>
+              {signal.stopLoss.basis}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div>
+        {(['1h', '15m', '5m'] as const).map((timeframe) => {
+          const analysis = snapshot.timeframes[timeframe]
+          if (!analysis) return null
+          return (
+            <div key={timeframe} className="grid grid-cols-[34px_minmax(0,1fr)] gap-2 border-b border-border/50 px-3 py-2 last:border-b-0">
+              <div className="pt-0.5 font-mono text-[10px] font-semibold leading-none text-foreground">{timeframe.toUpperCase()}</div>
+              <div className="min-w-0 text-[10px] leading-4">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-2 text-foreground">
+                  <span>MACD {macdLabel(analysis)}</span>
+                  <span>RSI {rsiLabel(analysis)}</span>
+                </div>
+                <div className="truncate text-muted-foreground" title={`PA ${structureLabel(analysis)} · ${paEventLabel(analysis.priceAction.event)} · 量 ${analysis.volume.ratio.toFixed(2)}x`}>
+                  PA {structureLabel(analysis)} · {paEventLabel(analysis.priceAction.event)} · 量 {analysis.volume.ratio.toFixed(2)}x
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {signal.logic.length > 0 && (
+        <div className="px-3 py-2">
+          <div className="mb-1.5 text-[10px] font-medium leading-none text-muted-foreground">开单逻辑</div>
+          <div className="space-y-1">
+            {signal.logic.slice(0, 8).map((item) => (
+              <div key={item} className="flex gap-1.5 text-[10px] leading-4 text-foreground">
+                <span className="mt-[7px] size-1 shrink-0 rounded-full bg-muted-foreground" />
+                <span>{item}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {signal.warnings.length > 0 && (
+        <div className="px-3 py-2 text-[10px] leading-4 text-[var(--chart-4)]">
+          {signal.warnings.slice(0, 3).join(' · ')}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function LeftSidebar({
   pairs,
   activeSymbol,
@@ -111,6 +286,9 @@ export function LeftSidebar({
   const [query, setQuery] = useState('')
   const [infoTab, setInfoTab] = useState<InfoTab>('signals')
   const [infoHeight, setInfoHeight] = useState<number | null>(null)
+  const [signalSnapshot, setSignalSnapshot] = useState<IntradaySignalSnapshot | null>(null)
+  const [signalLoading, setSignalLoading] = useState(false)
+  const [signalError, setSignalError] = useState<string | null>(null)
   const [searchResults, setSearchResults] = useState<TradingPair[]>([])
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
@@ -131,10 +309,48 @@ export function LeftSidebar({
     [pairs, query],
   )
   const knownInstruments = useMemo(() => new Set(pairs.map((pair) => pair.instrumentId)), [pairs])
+  const instrumentsParam = useMemo(() => pairs.map((pair) => pair.instrumentId).join(','), [pairs])
   const externalResults = useMemo(
     () => searchResults.filter((pair) => !knownInstruments.has(pair.instrumentId)),
     [knownInstruments, searchResults],
   )
+
+  const loadSignals = useCallback(async (signal?: AbortSignal) => {
+    setSignalLoading(true)
+    try {
+      const params = new URLSearchParams({
+        provider: 'okx',
+        symbol: activeSymbol,
+        instruments: instrumentsParam,
+      })
+      const response = await fetch(`/api/market/signals?${params.toString()}`, {
+        cache: 'no-store',
+        signal,
+      })
+      if (!response.ok) throw new Error(`信号接口 HTTP ${response.status}`)
+
+      const payload = (await response.json()) as IntradaySignalSnapshot
+      if (signal?.aborted) return
+      setSignalSnapshot(payload)
+      setSignalError(payload.source.status === 'offline' ? payload.source.errors[0] ?? '信号源不可用' : null)
+    } catch (error) {
+      if (signal?.aborted) return
+      setSignalError(error instanceof Error ? error.message : '信号源不可用')
+    } finally {
+      if (!signal?.aborted) setSignalLoading(false)
+    }
+  }, [activeSymbol, instrumentsParam])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void loadSignals(controller.signal)
+    const timer = window.setInterval(() => void loadSignals(), 30_000)
+
+    return () => {
+      controller.abort()
+      window.clearInterval(timer)
+    }
+  }, [loadSignals])
 
   const loadNews = useCallback(async (signal?: AbortSignal) => {
     setNewsLoading(true)
@@ -242,10 +458,10 @@ export function LeftSidebar({
         const payload = (await response.json()) as { ok: boolean; pairs?: TradingPair[]; error?: string }
         if (disposed) return
         setSearchResults(payload.pairs ?? [])
-        setSearchError(payload.ok ? null : payload.error ?? 'OKX 搜索不可用')
+        setSearchError(payload.ok ? null : payload.error ?? '交易对搜索不可用')
       } catch (error) {
         if (disposed || (error instanceof DOMException && error.name === 'AbortError')) return
-        setSearchError(error instanceof Error ? error.message : 'OKX 搜索不可用')
+        setSearchError(error instanceof Error ? error.message : '交易对搜索不可用')
       } finally {
         if (!disposed) setSearching(false)
       }
@@ -383,7 +599,7 @@ export function LeftSidebar({
           {(externalResults.length > 0 || searching || searchError) && (
             <div className="border-t border-border/70">
               <div className="flex items-center justify-between px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-                <span>OKX 合约</span>
+                <span>合约市场</span>
                 {searching && <LoaderCircle className="size-3 animate-spin" />}
               </div>
               {externalResults.map((pair) => {
@@ -463,8 +679,27 @@ export function LeftSidebar({
         <div className="min-h-0 flex-1 overflow-hidden">
           {infoTab === 'signals' && (
             <div className="h-full overflow-y-auto scrollbar-thin">
-              <SectionTitle icon={<Activity className="size-3.5" />} title="策略信号" />
-              <EmptyState label="暂无真实策略信号" />
+              <SectionTitle
+                icon={<Activity className="size-3.5" />}
+                title="日内信号"
+                extra={
+                  <button
+                    type="button"
+                    onClick={() => void loadSignals()}
+                    disabled={signalLoading}
+                    title="刷新信号"
+                    aria-label="刷新信号"
+                    className="inline-flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-wait disabled:opacity-70"
+                  >
+                    {signalLoading ? <LoaderCircle className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+                  </button>
+                }
+              />
+              {signalSnapshot?.activeSymbol === activeSymbol ? (
+                <SignalPanel snapshot={signalSnapshot} />
+              ) : (
+                <EmptyState label={signalError || (signalLoading ? '正在计算多周期信号' : '暂无可用信号')} />
+              )}
             </div>
           )}
 

@@ -2,15 +2,10 @@
 
 import Image from 'next/image'
 import {
-  Bell,
   Database,
   Lock,
-  Settings,
-  ShieldCheck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-
-const modes = ['行情', '回测', '实盘', '执行', '审计']
 
 type MarketSource = {
   name: string
@@ -19,6 +14,27 @@ type MarketSource = {
   fetchedAt: number
   errors: string[]
 } | null
+
+type StreamStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'error'
+
+type StreamHealth = {
+  tickerStatus: StreamStatus
+  candleStatus: StreamStatus
+  lastMessageAt: number | null
+}
+
+function isStreamDegraded(stream?: StreamHealth) {
+  if (!stream) return false
+  return [stream.tickerStatus, stream.candleStatus].some((status) => status === 'reconnecting' || status === 'error')
+}
+
+function streamStatusLabel(stream?: StreamHealth) {
+  if (!stream) return null
+  if (stream.tickerStatus === 'live' && stream.candleStatus === 'live') return 'WS 实时'
+  if (isStreamDegraded(stream)) return stream.tickerStatus === 'error' || stream.candleStatus === 'error' ? 'WS 异常' : 'WS 重连'
+  if (stream.tickerStatus === 'connecting' || stream.candleStatus === 'connecting') return 'WS 连接中'
+  return null
+}
 
 function StatusChip({
   icon,
@@ -51,17 +67,28 @@ export function TerminalStatusBar({
   source,
   loading,
   error,
+  stream,
 }: {
   source: MarketSource
   loading: boolean
   error: string | null
+  stream?: StreamHealth
 }) {
   const updatedAt = source
     ? new Date(source.fetchedAt).toLocaleTimeString('zh-CN', { hour12: false })
     : '--:--:--'
-  const marketName = source?.market?.toUpperCase() ?? 'OKX'
-  const dataLabel = error ? '行情异常' : loading ? '行情更新中' : source?.status === 'live' ? `${marketName} 实时` : `${marketName} 部分`
-  const dataTone = error ? 'warn' : source?.status === 'live' ? 'up' : 'neutral'
+  const streamLabel = streamStatusLabel(stream)
+  const streamDegraded = isStreamDegraded(stream)
+  const dataLabel = error
+    ? '行情异常'
+    : loading
+      ? '行情更新中'
+      : streamDegraded
+        ? `行情 ${streamLabel}`
+        : source?.status === 'live'
+          ? `行情 ${streamLabel ?? '实时'}`
+          : '行情 REST 补偿'
+  const dataTone = error || streamDegraded ? 'warn' : source?.status === 'live' ? 'up' : 'neutral'
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-sidebar px-3">
@@ -84,37 +111,14 @@ export function TerminalStatusBar({
         </div>
       </div>
 
-      <nav className="hidden items-center gap-1 md:flex">
-        {modes.map((item, i) => (
-          <button
-            key={item}
-            className={cn(
-              'inline-flex h-7 items-center justify-center rounded px-2.5 text-xs leading-none transition-colors',
-              i === 0 ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground',
-            )}
-          >
-            {item}
-          </button>
-        ))}
-      </nav>
-
       <div className="ml-auto hidden min-w-0 items-center gap-2 xl:flex">
         <StatusChip icon={<Database className="size-3.5" />} label={dataLabel} tone={dataTone} />
-        <StatusChip icon={<ShieldCheck className="size-3.5" />} label="风控正常" tone="up" />
         <StatusChip icon={<Lock className="size-3.5" />} label="实盘锁定" tone="locked" />
       </div>
 
-      <div className="ml-auto flex items-center gap-2 xl:ml-0">
-        <div className="hidden items-center gap-1 font-mono sm:flex">
-          <span className="text-[10px] text-muted-foreground">更新</span>
-          <span className="text-xs text-muted-foreground">{updatedAt}</span>
-        </div>
-        <button aria-label="通知" title="通知" className="text-muted-foreground transition-colors hover:text-foreground">
-          <Bell className="size-4" />
-        </button>
-        <button aria-label="设置" title="设置" className="text-muted-foreground transition-colors hover:text-foreground">
-          <Settings className="size-4" />
-        </button>
+      <div className="ml-auto flex items-center gap-1 font-mono text-muted-foreground xl:ml-0">
+        <span className="text-[10px]">更新</span>
+        <span className="text-xs">{updatedAt}</span>
       </div>
     </header>
   )

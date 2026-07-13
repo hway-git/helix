@@ -9,6 +9,8 @@
     "crypto",
     "trading",
     "freqtrade",
+    "price-action",
+    "strategy",
     "account",
     "execution",
     "helix"

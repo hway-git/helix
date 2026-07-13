@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { createOkxSwapPair, mergeTradingPairs, TRADING_PAIRS, type MarketSnapshot, type TradingPair } from '@/lib/market-data'
 import { getMarketDataProvider, resolveTradingPair } from '@/lib/server/market-providers'
+import { getWatchlistSnapshot } from '@/lib/server/watchlist'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -13,7 +14,7 @@ function emptyPair(pair: TradingPair): TradingPair {
   return { ...pair, sparkline: [], stale: true }
 }
 
-function pairsFromRequest(url: URL) {
+async function pairsFromRequest(url: URL) {
   const instruments = (url.searchParams.get('instruments') ?? '')
     .split(',')
     .map((value) => value.trim())
@@ -21,6 +22,7 @@ function pairsFromRequest(url: URL) {
     .map(createOkxSwapPair)
     .filter((pair): pair is TradingPair => pair != null)
 
+  if (instruments.length === 0) return (await getWatchlistSnapshot()).pairs
   return mergeTradingPairs([...TRADING_PAIRS, ...instruments])
 }
 
@@ -53,7 +55,7 @@ function errorSnapshot({
       contractType: activePair.contractType,
       status: 'partial',
       fetchedAt: Date.now(),
-      errors: [error instanceof Error ? error.message : 'market provider failed'],
+      errors: [error instanceof Error ? error.message : '行情源不可用'],
     },
   }
 }
@@ -61,7 +63,7 @@ function errorSnapshot({
 export async function GET(request: NextRequest) {
   const url = new URL(request.url)
   const provider = getMarketDataProvider(url.searchParams.get('provider') ?? 'okx')
-  const pairs = pairsFromRequest(url)
+  const pairs = await pairsFromRequest(url)
   const activePair = resolveTradingPair(pairs, url.searchParams.get('symbol'))
   const interval = provider.normalizeInterval(url.searchParams.get('interval'))
   const cacheKey = `${provider.id}:${activePair.symbol}:${interval}:${pairs.map((pair) => pair.instrumentId).join(',')}`

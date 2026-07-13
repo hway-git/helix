@@ -16,8 +16,8 @@ type IndicatorType = 'rsi' | 'macd' | 'volume'
 const TIMEFRAMES = ['1m', '5m', '15m', '1H', '4H', '1D']
 
 const META: Record<IndicatorType, { title: string; badge: string; height: string }> = {
-  rsi: { title: 'RSI 相对强弱', badge: 'RSI · Freqtrade', height: 'h-32' },
-  macd: { title: 'MACD 指数平滑异同', badge: 'MACD · Freqtrade', height: 'h-32' },
+  rsi: { title: 'RSI 相对强弱', badge: 'RSI · 14', height: 'h-32' },
+  macd: { title: 'MACD 指数平滑异同', badge: 'MACD · 12·26·9', height: 'h-32' },
   volume: { title: '成交量', badge: 'Volume', height: 'h-32' },
 }
 
@@ -81,13 +81,13 @@ export function CenterPanel({
         return technicalIndicators?.rsi.length ? (
           <RSIChart points={technicalIndicators.rsi} />
         ) : (
-          <IndicatorEmptyState loading={indicatorLoading} message={indicatorError || '当前策略未输出 RSI'} />
+          <IndicatorEmptyState loading={indicatorLoading} message={indicatorError || 'RSI14 数据不足'} />
         )
       case 'macd':
         return technicalIndicators?.macd.length ? (
           <MACDChart points={technicalIndicators.macd} />
         ) : (
-          <IndicatorEmptyState loading={indicatorLoading} message={indicatorError || '当前策略未输出 MACD'} />
+          <IndicatorEmptyState loading={indicatorLoading} message={indicatorError || 'MACD 数据不足'} />
         )
       case 'volume':
         return <VolumeChart candles={candles} />

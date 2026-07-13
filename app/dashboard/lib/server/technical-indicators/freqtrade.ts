@@ -41,7 +41,7 @@ function authHeader() {
 }
 
 async function ftGet<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
-  const base = process.env.FREQTRADE_URL || process.env.FT_API_URL || 'http://127.0.0.1:8080'
+  const base = process.env.FREQTRADE_URL || process.env.FT_API_URL || 'http://127.0.0.1:8888'
   const url = new URL(`/api/v1/${path}`, base)
   for (const [key, value] of Object.entries(params)) {
     if (value) url.searchParams.set(key, value)

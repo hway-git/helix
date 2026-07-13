@@ -31,9 +31,16 @@ type OkxFundingRate = {
   fundingTime?: string
 }
 
+type OkxInstrument = {
+  instId: string
+  tickSz?: string
+}
+
 const OKX_BASE_URL = 'https://www.okx.com'
 const CANDLE_LIMIT = '300'
 const MONDAY_DAILY_LIMIT = '14'
+const INSTRUMENT_CACHE_TTL_MS = 60 * 60 * 1000
+const instrumentCache = new Map<string, { expiresAt: number; tickSize: number }>()
 const OKX_INTERVALS = new Map([
   ['1m', '1m'],
   ['3m', '3m'],
@@ -70,10 +77,10 @@ async function requestOkx<T>(path: string, params: Record<string, string>) {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(15_000),
   })
-  if (!response.ok) throw new Error(`OKX HTTP ${response.status}`)
+  if (!response.ok) throw new Error(`行情源 HTTP ${response.status}`)
 
   const body = (await response.json()) as OkxEnvelope<T>
-  if (body.code !== '0') throw new Error(body.msg || `OKX code ${body.code}`)
+  if (body.code !== '0') throw new Error(body.msg || `行情源 code ${body.code}`)
   return body.data ?? ([] as T)
 }
 
@@ -131,8 +138,9 @@ function withFunding(pair: TradingPair, funding?: OkxFundingRate): TradingPair {
   }
 }
 
-function normalizeCandles(rows: string[][]): Candle[] {
+function normalizeCandles(rows: string[][], closedOnly = false): Candle[] {
   return rows
+    .filter((row) => !closedOnly || row[8] !== '0')
     .map((row) => ({
       time: numberFrom(row[0]) ?? 0,
       open: numberFrom(row[1]) ?? 0,
@@ -143,6 +151,50 @@ function normalizeCandles(rows: string[][]): Candle[] {
     }))
     .filter((candle) => candle.time > 0 && candle.open > 0 && candle.high > 0 && candle.low > 0 && candle.close > 0)
     .sort((a, b) => a.time - b.time)
+}
+
+function normalizeLimit(limit = Number(CANDLE_LIMIT)) {
+  const normalized = Number.isFinite(limit) ? Math.trunc(limit) : Number(CANDLE_LIMIT)
+  return String(Math.min(Math.max(normalized, 1), Number(CANDLE_LIMIT)))
+}
+
+async function getOkxCandles({
+  pair,
+  interval,
+  limit,
+  closedOnly,
+}: {
+  pair: TradingPair
+  interval: string
+  limit?: number
+  closedOnly?: boolean
+}) {
+  const rows = await requestOkx<string[][]>('/api/v5/market/candles', {
+    instId: pair.instrumentId,
+    bar: OKX_INTERVALS.get(interval) ?? '15m',
+    limit: normalizeLimit(limit),
+  })
+  return normalizeCandles(rows, closedOnly)
+}
+
+async function getOkxInstrumentMetadata(pair: TradingPair) {
+  const cached = instrumentCache.get(pair.instrumentId)
+  if (cached && cached.expiresAt > Date.now()) return { tickSize: cached.tickSize }
+
+  const instruments = await requestOkx<OkxInstrument[]>('/api/v5/public/instruments', {
+    instType: 'SWAP',
+    instId: pair.instrumentId,
+  })
+  const tickSize = numberFrom(instruments[0]?.tickSz)
+  if (tickSize == null || tickSize <= 0) {
+    throw new Error(`行情源未返回 ${pair.instrumentId} 的 tick size`)
+  }
+
+  instrumentCache.set(pair.instrumentId, {
+    expiresAt: Date.now() + INSTRUMENT_CACHE_TTL_MS,
+    tickSize,
+  })
+  return { tickSize }
 }
 
 function startOfUtcMonday(time: number): number {
@@ -172,10 +224,12 @@ function mondayLevelsFromDailyCandles(candles: Candle[]): MarketLevels | undefin
 
 export const okxMarketProvider: MarketDataProvider = {
   id: 'okx',
-  name: 'OKX Market Data',
+  name: '行情源',
   market: 'okx',
   supportedIntervals: new Set(OKX_INTERVALS.keys()),
   normalizeInterval,
+  getCandles: getOkxCandles,
+  getInstrumentMetadata: ({ pair }) => getOkxInstrumentMetadata(pair),
   async getSnapshot({ activePair, pairs, interval }) {
     const fetchedAt = Date.now()
     const errors: string[] = []
@@ -194,12 +248,7 @@ export const okxMarketProvider: MarketDataProvider = {
     }
 
     try {
-      const rows = await requestOkx<string[][]>('/api/v5/market/candles', {
-        instId: activePair.instrumentId,
-        bar: OKX_INTERVALS.get(interval) ?? '15m',
-        limit: CANDLE_LIMIT,
-      })
-      candles = normalizeCandles(rows)
+      candles = await getOkxCandles({ pair: activePair, interval })
       const sparkline = candles.slice(-32).map((candle) => candle.close)
       resolvedActivePair = { ...resolvedActivePair, sparkline }
       resolvedPairs = resolvedPairs.map((pair) => (pair.symbol === resolvedActivePair.symbol ? resolvedActivePair : pair))

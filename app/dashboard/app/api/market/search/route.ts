@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
       {
         ok: false,
         pairs: [],
-        error: error instanceof Error ? error.message : 'OKX 搜索不可用',
+        error: error instanceof Error ? error.message : '交易对搜索不可用',
       },
       { headers: { 'Cache-Control': 'no-store' }, status: 200 },
     )

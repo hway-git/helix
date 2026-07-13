@@ -5,7 +5,6 @@ import {
   Activity,
   AlertTriangle,
   Bot,
-  CheckCircle2,
   ClipboardList,
   Lock,
   Newspaper,
@@ -31,7 +30,7 @@ const INITIAL: Message[] = [
   {
     id: 'm1',
     role: 'agent',
-    content: '行情已接入 OKX。账户、策略和执行链路尚未连接，当前保持只读与实盘锁定。',
+    content: '实时行情、账户快照、策略创建和回测已接入；Freqtrade 仅允许模拟部署，实盘交易仍锁定。',
     time: '--:--',
   },
 ]
@@ -48,7 +47,7 @@ const suggestions = [
   { icon: Newspaper, label: '汇总今日事件' },
 ]
 
-const cannedReply = '当前只读模式不会触发下单。涉及账户、策略或执行的问题，需要等对应后端接口接入后再生成真实预览。'
+const cannedReply = '当前界面不会触发实盘下单；策略可以创建、回测并模拟部署，LIVE 交易仍需要单独授权。'
 
 function now() {
   return new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
@@ -82,9 +81,9 @@ function Metric({
 
 function RiskPanel() {
   const rules = [
-    ['账户连接', '--', '未连接'],
-    ['策略预览', '--', '未连接'],
-    ['审计流水', '--', '待接入'],
+    ['账户连接', 'READ', '已接入'],
+    ['策略预览', 'DRY_RUN', '可控'],
+    ['审计流水', 'LOGS', '已接入'],
     ['实盘开关', 'Locked', '锁定'],
   ]
 
@@ -339,7 +338,6 @@ export function AgentChat({
       <header className="flex items-center gap-2.5 border-b border-border px-4 py-3">
         <div className="relative flex size-8 items-center justify-center overflow-hidden rounded bg-primary/15 ring-1 ring-primary/20">
           <img src="/helix-ai-avatar.png" alt="" className="size-8 object-cover" />
-          <CheckCircle2 className="absolute -right-1 -top-1 size-3.5 rounded-full bg-sidebar text-up" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 text-sm font-semibold leading-none">
@@ -348,7 +346,7 @@ export function AgentChat({
           </div>
           <div className="mt-1.5 flex items-center gap-1.5 font-mono text-[10px] leading-none">
             <span className="inline-flex h-5 items-center rounded border border-up/30 bg-up/10 px-1.5 text-up">
-              只读模式
+              模拟控制
             </span>
             <span className="inline-flex h-5 items-center rounded border border-down/30 bg-down/10 px-1.5 text-down">
               实盘锁定

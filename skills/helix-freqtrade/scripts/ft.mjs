@@ -2,20 +2,19 @@
 // Freqtrade Bot Control CLI.
 //
 // 在 CoinClaw 三引擎容器里, freqtrade 是 supervisord 管的常驻 daemon —
-// 不要自己起进程, 用本脚本通过 :8080 REST 控制. 切策略 / 切交易对 /
-// 切实盘 / 重启 daemon 也都在这里.
+// 不要自己起进程, 用本脚本通过 :8888 REST 控制. 策略和模式变更统一走
+// ft-deploy.mjs deploy, 由它执行回测指纹门禁并重启 daemon.
 import {
-  readFileSync, writeFileSync, existsSync, copyFileSync, renameSync, chmodSync,
+  readFileSync, writeFileSync, copyFileSync, renameSync, chmodSync,
 } from 'node:fs';
-import { execSync } from 'node:child_process';
 import { ftGet, ftPost, ftDelete, ftCli } from '../lib/freqtrade-api.mjs';
-import { coinclawEnv, supervisorSocket } from '../lib/coinclaw-env.mjs';
+import { managedFreqtradeEnv } from '../lib/coinclaw-env.mjs';
 
 // ── 帮助函数: 读 / 改 daemon 的 config.json ───────────────────────────
 // 三引擎下 config 路径不同, 通过 coinclaw-env 解析.
 function configPath() {
-  const env = coinclawEnv();
-  if (!env) throw new Error('config 操作仅在 CoinClaw 容器内可用 (host 模式请用 ft-deploy.mjs deploy)');
+  const env = managedFreqtradeEnv();
+  if (!env) throw new Error('config 操作仅在托管 daemon 环境可用 (host 模式请用 ft-deploy.mjs deploy)');
   return env.configPath;
 }
 
@@ -40,34 +39,6 @@ function writeConfigAtomic(cfg) {
   chmodSync(path, 0o600);
 }
 
-// 重启 freqtrade daemon. 优先 supervisorctl (cleanest), 退到 kill 让
-// supervisord autorestart 拉起. 仅 CoinClaw 容器内可用.
-function restartDaemon() {
-  const env = coinclawEnv();
-  if (!env) throw new Error('restart 仅在 CoinClaw 容器内可用');
-  const sock = supervisorSocket();
-  // 1) 优先走 supervisorctl. 三引擎的 supervisord.conf 都把 freqtrade 注册为 program:freqtrade.
-  try {
-    execSync(`supervisorctl -s unix://${sock} restart freqtrade`, {
-      stdio: 'pipe', timeout: 30000,
-    });
-    return { method: 'supervisorctl', restarted: true };
-  } catch (e) {
-    // 2) 退到 kill freqtrade pid. supervisord autorestart=true / unexpected
-    //    都会重新拉起. 找 freqtrade 进程的 pid: pgrep -f 'freqtrade trade'.
-    try {
-      const pid = execSync("pgrep -f 'freqtrade trade' | head -n1", {
-        encoding: 'utf-8', timeout: 5000,
-      }).trim();
-      if (pid) {
-        process.kill(Number(pid), 'SIGTERM');
-        return { method: 'kill+autorestart', pid: Number(pid), restarted: true };
-      }
-    } catch {}
-    throw new Error(`restart 失败: supervisorctl 不可达 (${e.message}), 且没找到 freqtrade 进程`);
-  }
-}
-
 ftCli({
   // ── 健康检查 / 信息查询 (REST GET) ──────────────────────────
   ping: () => ftGet('ping'),
@@ -79,12 +50,13 @@ ftCli({
   // ── daemon 综合信息 (一次拿状态 / 策略 / 模式 / 交易对) ───
   // 给 agent 在用户问 "freqtrade 现在跑什么?" 时单次调用就能答全.
   daemon_info: async () => {
-    const [cfg, status, version] = await Promise.all([
-      ftGet('show_config').catch((e) => ({ error: e.message })),
+    const cfg = await ftGet('show_config');
+    const [status, version] = await Promise.all([
       ftGet('status').catch(() => []),
       ftGet('version').catch(() => ({})),
     ]);
     return {
+      online: true,
       version: version.version,
       strategy: cfg.strategy,
       timeframe: cfg.timeframe,
@@ -104,33 +76,8 @@ ftCli({
   start: () => ftPost('start'),
   stop: () => ftPost('stop'),
   reload: () => ftPost('reload_config'),
-  // 重启整个 freqtrade 进程 — 切策略 / 切实盘必需 (reload_config 不切策略).
-  restart: async () => restartDaemon(),
 
-  // ── 配置变更 (改 config.json + reload 或 restart) ─────────
-  // 切策略: 改 config.strategy + 重启 daemon. 不能用 reload_config —
-  // freqtrade 1.x 的 reload_config 不重新加载 IStrategy 类.
-  set_strategy: async ({ strategy, reload = true }) => {
-    if (!strategy) throw new Error('strategy 必填, 例: {"strategy":"MyStrat"}');
-    const env = coinclawEnv();
-    if (!env) throw new Error('set_strategy 仅在 CoinClaw 容器内可用');
-    // 验证策略文件存在.
-    const stratFile = `${env.strategyPath}/${strategy}.py`;
-    if (!existsSync(stratFile)) {
-      throw new Error(`策略文件不存在: ${stratFile}. 先用 ft-deploy.mjs create_strategy 或写到 ${env.strategyPath}/`);
-    }
-    const cfg = readConfig();
-    const before = cfg.strategy;
-    cfg.strategy = strategy;
-    writeConfigAtomic(cfg);
-    let restart = null;
-    if (reload) restart = await restartDaemon();
-    return {
-      from: before, to: strategy, file: stratFile, restart,
-      note: '策略生效需要 daemon 重启完成 (10-30s), 之后 dashboard 会刷出新策略名',
-    };
-  },
-
+  // ── 配置变更 (改 config.json + reload) ────────────────────
   // 切交易对白名单. pair_whitelist 改了之后调 /reload_config 即可,
   // 不需要重启 daemon. freqtrade 会在下一根 candle close 时应用.
   set_pairs: async ({ pairs, reload = true }) => {
@@ -147,26 +94,6 @@ ftCli({
       try { reloaded = await ftPost('reload_config'); } catch (e) { reloaded = { error: e.message }; }
     }
     return { from: before, to: pairs, reloaded };
-  },
-
-  // 切实盘 / 模拟. dry_run 改了必须 daemon 重启 — exchange 客户端在
-  // freqtrade 启动时根据 dry_run 选 ccxt vs ccxt sandbox, 运行中切不掉.
-  // 实盘要求交易所 API key 已经写到 config.exchange.key/secret (entrypoint
-  // 启动时从 .env 自动 patch 进去).
-  set_dry_run: async ({ dry_run, restart = true }) => {
-    if (typeof dry_run !== 'boolean') {
-      throw new Error('dry_run 必填且为 boolean, 例: {"dry_run":false}');
-    }
-    const cfg = readConfig();
-    const before = cfg.dry_run;
-    cfg.dry_run = dry_run;
-    writeConfigAtomic(cfg);
-    let restartResult = null;
-    if (restart) restartResult = await restartDaemon();
-    return {
-      from: before, to: dry_run, restart: restartResult,
-      warning: dry_run ? null : '⚠️ 已切到实盘 — 真实交易, 真实亏损. 确认 .env 里的交易所 key 是对的, 余额可控.',
-    };
   },
 
   // ── 状态 / 持仓 / 交易历史 (REST GET) ───────────────────────

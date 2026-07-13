@@ -27,7 +27,6 @@ function formatFundingRate(rate?: number) {
 
 export function SymbolHeader({ pair }: { pair: TradingPair }) {
   const positive = pair.change >= 0
-  const market = pair.market.toUpperCase()
   const contractLabel = pair.contractType === 'perpetual' ? '永续' : '现货'
   const fundingTone = pair.fundingRate == null ? undefined : pair.fundingRate >= 0 ? 'up' : 'down'
 
@@ -46,7 +45,7 @@ export function SymbolHeader({ pair }: { pair: TradingPair }) {
             </span>
           </div>
           <div className="text-[11px] text-muted-foreground">
-            {market} · {pair.instrumentId}
+            {contractLabel} · {pair.instrumentId}
           </div>
         </div>
       </div>
@@ -66,7 +65,7 @@ export function SymbolHeader({ pair }: { pair: TradingPair }) {
         <Stat label="24h 最低" value={pair.low24h == null ? '--' : formatPrice(pair.low24h)} tone="down" />
         <Stat label="24h 量" value={pair.volume} />
         <Stat label="资金费率" value={formatFundingRate(pair.fundingRate)} tone={fundingTone} />
-        <Stat label="数据源" value={pair.stale ? 'STALE' : market} />
+        <Stat label="数据源" value={pair.stale ? 'STALE' : 'LIVE'} />
       </div>
     </div>
   )

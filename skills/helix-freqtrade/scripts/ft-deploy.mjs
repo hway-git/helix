@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // ft-deploy.mjs — strategy lifecycle, backtest, hyperopt.
 //
-// 两套运行模式自动切换:
+// 三套运行模式自动切换:
 //   - CoinClaw 容器内 (OpenClaw / Hermes / Claude Code): freqtrade 已是
 //     supervisord 管的常驻 daemon, 本脚本"部署策略" = 写策略文件 +
 //     改 config.strategy + 重启 daemon. 不再 git clone freqtrade,
-//     不再 nohup 后台进程, 不跟 daemon 抢 8080 端口.
+//     不再 nohup 后台进程, 不跟 daemon 抢 8888 端口.
+//   - 本机 Docker: daemon 由 docker/freqtrade/compose.yaml 管理, CLI 工作
+//     使用同一镜像的一次性容器, 与 daemon 共享 ~/.freqtrade/user_data.
 //   - host 模式 (用户本地 macOS / Linux): 沿用老路径, 自己 clone freqtrade,
 //     起后台进程, 写 PID file. 这条路在 coinclaw 之外仍然有效.
 //
@@ -17,11 +19,11 @@ import {
 } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { execFileSync, execSync, spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import {
-  coinclawEnv, hostModeFreqtradePaths, envFileCandidates, supervisorSocket,
+  coinclawEnv, dockerFreqtradeEnv, hostModeFreqtradePaths, envFileCandidates, supervisorSocket,
 } from '../lib/coinclaw-env.mjs';
 import { ftGet, ftPost } from '../lib/freqtrade-api.mjs';
 import {
@@ -32,7 +34,10 @@ import {
 const __dir = dirname(fileURLToPath(import.meta.url));
 
 // ─── 模式 / 路径解析 ─────────────────────────────────────────────
-const ENV = coinclawEnv();
+const COINCLAW_ENV = coinclawEnv();
+const DOCKER_ENV = COINCLAW_ENV ? null : dockerFreqtradeEnv();
+const ENV = COINCLAW_ENV || DOCKER_ENV;
+const IS_DOCKER = ENV?.engine === 'docker';
 const HOST = hostModeFreqtradePaths();
 
 // 三引擎下 STRAT_DIR / USER_DATA / CONFIG_PATH 直接来自 daemon 启动参数,
@@ -42,6 +47,10 @@ const STRAT_DIR  = ENV ? ENV.strategyPath      : HOST.strategyPath;
 const USER_DATA  = ENV ? ENV.freqtradeUserdir  : HOST.userdir;
 const CONFIG_PATH = ENV ? ENV.configPath       : HOST.configPath;
 const ENV_FILE   = ENV ? ENV.envFile           : envFileCandidates()[0]; // host: ~/.helix/.env(规范位置, 与读路径最高优先级一致)
+const FT_API_PORT = 8888;
+const FT_API_URL = `http://127.0.0.1:${FT_API_PORT}`;
+const BACKTEST_EVIDENCE_VERSION = 1;
+const BACKTEST_EVIDENCE_FILE = resolve(USER_DATA, 'backtest_results', '.helix-evidence.json');
 
 // FT_BIN 解析顺序:
 //   1. coinclaw 容器: 'freqtrade' — image PATH 上已经有 (entrypoint
@@ -53,7 +62,7 @@ const ENV_FILE   = ENV ? ENV.envFile           : envFileCandidates()[0]; // host
 //      ~500MB. 见 commit 50011b8.
 //   3. host fallback: ~/.freqtrade/source/.venv/bin/freqtrade — 真
 //      没有时才走 setup.sh 装到 venv.
-const FT_BIN = ENV ? 'freqtrade' : (() => {
+const FT_BIN = ENV ? (IS_DOCKER ? 'docker' : 'freqtrade') : (() => {
   try {
     const sys = execFileSync('which', ['freqtrade'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     if (sys && existsSync(sys)) return sys;
@@ -68,6 +77,35 @@ function run(cmd, opts = {}) {
 
 function runFile(file, args = [], opts = {}) {
   return execFileSync(file, args, { encoding: 'utf-8', timeout: 600000, ...opts }).trim();
+}
+
+function runtimeMode() {
+  return IS_DOCKER ? 'docker' : ENV ? 'coinclaw' : 'host';
+}
+
+function dockerCompose(args, opts = {}) {
+  if (!IS_DOCKER) throw new Error('Docker Freqtrade runtime is not enabled.');
+  if (!existsSync(ENV.composeFile)) throw new Error(`Freqtrade compose file not found: ${ENV.composeFile}`);
+  return runFile('docker', [
+    'compose', '--env-file', ENV.envFile, '-f', ENV.composeFile, ...args,
+  ], opts);
+}
+
+function dockerCliPath(value) {
+  if (typeof value !== 'string') return value;
+  if (value === USER_DATA || value.startsWith(`${USER_DATA}/`)) {
+    return `${ENV.containerUserdir}${value.slice(USER_DATA.length)}`;
+  }
+  return value;
+}
+
+function runFreqtrade(args, opts = {}) {
+  if (IS_DOCKER) {
+    return dockerCompose([
+      'run', '--rm', '--no-deps', 'freqtrade', ...args.map(dockerCliPath),
+    ], opts);
+  }
+  return runFile(FT_BIN, args, opts);
 }
 
 function hasCommand(cmd) {
@@ -85,6 +123,145 @@ function parseTailLines(lines, fallback = 50) {
     throw new Error('lines 必须是 1-1000 的整数');
   }
   return n;
+}
+
+function numberOrNull(value) {
+  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+function firstNumber(...values) {
+  for (const value of values) {
+    const n = numberOrNull(value);
+    if (n != null) return n;
+  }
+  return null;
+}
+
+function readJsonFile(file) {
+  try { return JSON.parse(readFileSync(file, 'utf-8')); } catch { return null; }
+}
+
+function strategyFingerprint(strategy) {
+  const file = resolve(STRAT_DIR, `${strategy}.py`);
+  if (!existsSync(file)) return null;
+  return createHash('sha256').update(readFileSync(file)).digest('hex');
+}
+
+function readBacktestEvidence() {
+  const payload = readJsonFile(BACKTEST_EVIDENCE_FILE);
+  return payload?.version === BACKTEST_EVIDENCE_VERSION && Array.isArray(payload.records)
+    ? payload.records
+    : [];
+}
+
+function backtestMetaFiles(resultsDir) {
+  if (!existsSync(resultsDir)) return [];
+  return readdirSync(resultsDir).filter((file) => file.endsWith('.meta.json'));
+}
+
+function findNewBacktestResult(resultsDir, beforeFiles, strategy) {
+  return backtestMetaFiles(resultsDir)
+    .filter((file) => !beforeFiles.has(file))
+    .sort((a, b) => b.localeCompare(a))
+    .find((file) => {
+      const meta = readJsonFile(resolve(resultsDir, file));
+      return meta && Object.prototype.hasOwnProperty.call(meta, strategy);
+    })
+    ?.replace('.meta.json', '') || null;
+}
+
+function recordBacktestEvidence({ strategy, strategyHash, timeframe, timerange, pairs, resultFile }) {
+  const resultsDir = dirname(BACKTEST_EVIDENCE_FILE);
+  mkdirSync(resultsDir, { recursive: true });
+  const record = {
+    id: `${Date.now()}-${strategyHash.slice(0, 12)}`,
+    strategy,
+    strategyHash,
+    timeframe,
+    timerange: timerange || '',
+    pairs,
+    resultFile,
+    createdAt: new Date().toISOString(),
+  };
+  const payload = {
+    version: BACKTEST_EVIDENCE_VERSION,
+    records: [record, ...readBacktestEvidence()].slice(0, 100),
+  };
+  const tempFile = `${BACKTEST_EVIDENCE_FILE}.tmp.${process.pid}`;
+  writeFileSync(tempFile, `${JSON.stringify(payload, null, 2)}\n`);
+  chmodSync(tempFile, 0o600);
+  renameSync(tempFile, BACKTEST_EVIDENCE_FILE);
+  return record;
+}
+
+function requireCurrentBacktestEvidence(strategy) {
+  const strategyHash = strategyFingerprint(strategy);
+  const evidence = strategyHash
+    ? readBacktestEvidence().find((record) => (
+      record.strategy === strategy && record.strategyHash === strategyHash
+    ))
+    : null;
+  if (!evidence) {
+    throw new Error(`Current code for strategy "${strategy}" has not been backtested. Run backtest before deploy.`);
+  }
+  return evidence;
+}
+
+function readBacktestZipJson(zipFile) {
+  if (!hasCommand('unzip')) return null;
+  try {
+    const entries = runFile('unzip', ['-Z1', zipFile], { maxBuffer: 1024 * 1024 })
+      .split('\n')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    const jsonEntry = entries.find((entry) => entry.endsWith('.json') && !entry.endsWith('.meta.json'));
+    if (!jsonEntry) return null;
+
+    const content = runFile('unzip', ['-p', zipFile, jsonEntry], { maxBuffer: 50 * 1024 * 1024 });
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+function readBacktestPayload(resultsDir, baseFile) {
+  const jsonFile = resolve(resultsDir, `${baseFile}.json`);
+  if (existsSync(jsonFile)) return readJsonFile(jsonFile);
+
+  const zipFile = resolve(resultsDir, `${baseFile}.zip`);
+  if (existsSync(zipFile)) return readBacktestZipJson(zipFile);
+
+  return null;
+}
+
+function firstStrategySummary(payload, strategy) {
+  if (!payload || typeof payload !== 'object') return null;
+  const strategyMap = payload.strategy && typeof payload.strategy === 'object' ? payload.strategy : payload;
+  if (strategyMap[strategy] && typeof strategyMap[strategy] === 'object') return strategyMap[strategy];
+
+  const firstKey = Object.keys(strategyMap).find((key) => strategyMap[key] && typeof strategyMap[key] === 'object');
+  return firstKey ? strategyMap[firstKey] : null;
+}
+
+function backtestMetrics(summary) {
+  if (!summary || typeof summary !== 'object') return {};
+
+  const trades = firstNumber(summary.total_trades, summary.trade_count, summary.trades);
+  const wins = firstNumber(summary.winning_trades, summary.wins, summary.win_trades);
+  const draws = firstNumber(summary.draws, summary.draw_trades);
+  const losses = firstNumber(summary.losing_trades, summary.losses, summary.loss_trades);
+  const winRate = firstNumber(summary.winrate, summary.win_rate)
+    ?? (wins != null && trades ? wins / trades : null)
+    ?? (wins != null && losses != null && (wins + losses + (draws ?? 0)) > 0 ? wins / (wins + losses + (draws ?? 0)) : null);
+
+  return {
+    trades,
+    profitPct: firstNumber(summary.profit_total_pct, summary.profit_total_percent, summary.total_profit_pct, summary.profit_total),
+    profitAbs: firstNumber(summary.profit_total_abs, summary.total_profit_abs, summary.profit_abs),
+    winRate,
+    drawdown: firstNumber(summary.max_drawdown_account, summary.max_drawdown_pct, summary.drawdown, summary.max_drawdown),
+  };
 }
 
 function assertStrategyName(strategy) {
@@ -188,6 +365,10 @@ function writeDaemonConfig(cfg) {
 }
 
 function restartDaemon() {
+  if (IS_DOCKER) {
+    dockerCompose(['up', '-d', '--force-recreate', '--no-deps', 'freqtrade'], { timeout: 60_000 });
+    return { method: 'docker compose recreate' };
+  }
   if (!ENV) throw new Error('restart daemon 仅在 coinclaw 容器内可用');
   const sock = supervisorSocket();
   try {
@@ -313,8 +494,8 @@ function generateHostConfig(exchangeInfo, apiPassword, params = {}) {
     exit_pricing: { price_side: 'same', use_order_book: true, order_book_top: 1 },
     api_server: {
       enabled: true,
-      listen_ip_address: '127.0.0.1',
-      listen_port: 8080,
+      listen_ip_address: IS_DOCKER ? '0.0.0.0' : '127.0.0.1',
+      listen_port: IS_DOCKER ? 8080 : FT_API_PORT,
       verbosity: 'error',
       enable_openapi: false,
       jwt_secret_key: randomBytes(16).toString('hex'),
@@ -343,6 +524,31 @@ function ensureStrategyDir() {
   mkdirSync(STRAT_DIR, { recursive: true });
 }
 
+function ensureHostFreqtradeInstalled() {
+  if (IS_DOCKER) {
+    if (!hasCommand('docker')) throw new Error('Docker is required for the configured Freqtrade runtime.');
+    if (!existsSync(ENV.composeFile)) throw new Error(`Freqtrade compose file not found: ${ENV.composeFile}`);
+    return;
+  }
+  if (ENV || existsSync(FT_BIN)) return;
+  const py = ensureModernPython();
+  console.error(`Using ${py.version} (${py.bin})`);
+  if (!hasCommand('git')) throw new Error('git not found.');
+
+  ensureStrategyDir();
+  if (!existsSync(resolve(HOST.sourceDir, 'setup.sh'))) {
+    console.error('Cloning Freqtrade repository...');
+    runFile('git', ['clone', 'https://github.com/freqtrade/freqtrade.git', HOST.sourceDir], { timeout: 120000 });
+    runFile('git', ['checkout', 'stable'], { cwd: HOST.sourceDir, timeout: 30000 });
+  }
+
+  console.error('Running Freqtrade setup.sh (this may take a few minutes)...');
+  const pyDir = dirname(py.bin);
+  const setupEnv = { ...process.env, PATH: `${pyDir}:${process.env.PATH}` };
+  runFile(resolve(HOST.sourceDir, 'setup.sh'), ['-i'], { cwd: HOST.sourceDir, timeout: 600000, env: setupEnv });
+  if (!existsSync(FT_BIN)) throw new Error('Freqtrade installation failed.');
+}
+
 // ─── Actions ─────────────────────────────────────────────────────
 const actions = {
   // ── check ──────────────────────────────────────────────────────
@@ -350,7 +556,7 @@ const actions = {
   // host 模式: 检查 python / git / freqtrade installed / pid.
   check: async () => {
     if (ENV) {
-      const checks = { mode: 'coinclaw', engine: ENV.engine, paths: {
+      const checks = { mode: runtimeMode(), engine: ENV.engine, paths: {
         userdir: USER_DATA, strategy_path: STRAT_DIR, config: CONFIG_PATH,
       }};
       const state = await fetchDaemonState();
@@ -368,7 +574,9 @@ const actions = {
           checks.stake_currency = bal.stake;
         } catch (e) { checks.balance_error = e.message; }
       } else {
-        checks.note = '在 coinclaw 容器里 daemon 由 supervisord 管理, 它没起来通常是 cold-start 卡住或 config 写错; 看 /workspace/logs/freqtrade-error.log 或 /home/node/.openclaw/workspace/.freqtrade/logs/';
+        checks.note = IS_DOCKER
+          ? 'Docker daemon 未响应; 使用 ft-deploy.mjs logs 查看容器日志。'
+          : '在 coinclaw 容器里 daemon 由 supervisord 管理, 它没起来通常是 cold-start 卡住或 config 写错; 看 /workspace/logs/freqtrade-error.log 或 /home/node/.openclaw/workspace/.freqtrade/logs/';
       }
       return checks;
     }
@@ -408,13 +616,15 @@ const actions = {
   //   改 config.strategy + 重启 daemon. 不再 git clone, 不再 nohup.
   // host 模式: 沿用老路径 (clone + setup.sh + nohup).
   deploy: async (params = {}) => {
+    const strategy = params.strategy ? assertStrategyName(params.strategy) : null;
+    if (!strategy) throw new Error('strategy 必填, 例: {"strategy":"MyStrat"}');
+    const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
+    if (!existsSync(stratFile)) {
+      throw new Error(`策略文件不存在: ${stratFile}. 先用 create_strategy 创建策略并完成回测。`);
+    }
+    const evidence = requireCurrentBacktestEvidence(strategy);
+
     if (ENV) {
-      const strategy = params.strategy ? assertStrategyName(params.strategy) : null;
-      if (!strategy) throw new Error('strategy 必填, 例: {"strategy":"MyStrat"}');
-      const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
-      if (!existsSync(stratFile)) {
-        throw new Error(`策略文件不存在: ${stratFile}. 先用 ft-deploy.mjs create_strategy 或 Write 工具写文件到 ${STRAT_DIR}/`);
-      }
       const cfg = readDaemonConfig();
       const before = { strategy: cfg.strategy, dry_run: cfg.dry_run, pairs: cfg.exchange?.pair_whitelist };
       cfg.strategy = strategy;
@@ -428,8 +638,8 @@ const actions = {
       writeDaemonConfig(cfg);
       const restart = restartDaemon();
       return {
-        success: true, mode: 'coinclaw', engine: ENV.engine,
-        strategy, before, restart,
+        success: true, mode: runtimeMode(), engine: ENV.engine,
+        strategy, before, restart, backtest_evidence: evidence.id,
         config_path: CONFIG_PATH, strategy_file: stratFile,
         note: '策略生效需 daemon 重启完成 (10-30s); dashboard 会自动刷新到新策略名',
         warning: cfg.dry_run === false
@@ -437,10 +647,8 @@ const actions = {
           : null,
       };
     }
-    // host mode (老逻辑, 保留不动)
-    const py = ensureModernPython();
-    console.error(`Using ${py.version} (${py.bin})`);
-    if (!hasCommand('git')) throw new Error('git not found.');
+    // host mode
+    ensureHostFreqtradeInstalled();
     let exchangeInfo = detectExchange();
     if (!exchangeInfo) {
       if (params.dry_run !== false) {
@@ -452,19 +660,6 @@ const actions = {
       }
     }
     mkdirSync(STRAT_DIR, { recursive: true });
-    ensureSdkAndTemplates();
-    if (!existsSync(FT_BIN)) {
-      if (!existsSync(resolve(HOST.sourceDir, 'setup.sh'))) {
-        console.error('Cloning Freqtrade repository...');
-        runFile('git', ['clone', 'https://github.com/freqtrade/freqtrade.git', HOST.sourceDir], { timeout: 120000 });
-        runFile('git', ['checkout', 'stable'], { cwd: HOST.sourceDir, timeout: 30000 });
-      }
-      console.error('Running Freqtrade setup.sh (this may take a few minutes)...');
-      const pyDir = dirname(py.bin);
-      const setupEnv = { ...process.env, PATH: `${pyDir}:${process.env.PATH}` };
-      runFile(resolve(HOST.sourceDir, 'setup.sh'), ['-i'], { cwd: HOST.sourceDir, timeout: 600000, env: setupEnv });
-      if (!existsSync(FT_BIN)) throw new Error('Freqtrade installation failed.');
-    }
     const apiPassword = randomBytes(8).toString('hex');
     const config = generateHostConfig(exchangeInfo, apiPassword, params);
     writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
@@ -473,11 +668,6 @@ const actions = {
     if (!existsSync(samplePath)) writeFileSync(samplePath, SAMPLE_STRATEGY);
     const oldPid = getHostPid();
     if (oldPid) { try { process.kill(oldPid, 'SIGTERM'); } catch {} }
-    const strategy = assertStrategyName(params.strategy || 'SampleStrategy');
-    const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
-    if (strategy !== 'SampleStrategy' && !existsSync(stratFile)) {
-      throw new Error(`Strategy "${strategy}" not found at ${stratFile}. Use create_strategy first.`);
-    }
     startHostTrade(strategy);
     let ready = false;
     for (let i = 0; i < 15; i++) {
@@ -485,7 +675,7 @@ const actions = {
       const pid = getHostPid();
       if (pid) {
         try {
-          const res = await fetch(`http://127.0.0.1:8080/api/v1/ping`, {
+          const res = await fetch(`${FT_API_URL}/api/v1/ping`, {
             headers: { Authorization: 'Basic ' + Buffer.from(`freqtrade:${apiPassword}`).toString('base64') },
             signal: AbortSignal.timeout(3000),
           });
@@ -493,14 +683,14 @@ const actions = {
         } catch {}
       }
     }
-    appendEnv('FREQTRADE_URL', 'http://127.0.0.1:8080');
+    appendEnv('FREQTRADE_URL', FT_API_URL);
     appendEnv('FREQTRADE_USERNAME', 'freqtrade');
     appendEnv('FREQTRADE_PASSWORD', apiPassword);
     return {
-      success: true, mode: 'host',
+      success: true, mode: 'host', backtest_evidence: evidence.id,
       exchange: exchangeInfo.name, strategy, dry_run: config.dry_run,
       pairs: config.exchange.pair_whitelist,
-      api_url: 'http://127.0.0.1:8080', api_auth: 'stored in .env (FREQTRADE_PASSWORD)',
+      api_url: FT_API_URL, api_auth: 'stored in .env (FREQTRADE_PASSWORD)',
       pid: getHostPid(), ready, log_file: HOST.logFile, config_path: CONFIG_PATH,
       strategies_dir: STRAT_DIR,
       note: config.dry_run ? 'Running in DRY-RUN mode' : 'WARNING: Running in LIVE mode',
@@ -509,6 +699,11 @@ const actions = {
 
   // ── update ─────────────────────────────────────────────────────
   update: async () => {
+    if (IS_DOCKER) {
+      dockerCompose(['pull', 'freqtrade']);
+      dockerCompose(['up', '-d', 'freqtrade']);
+      return { updated: true, mode: 'docker', note: 'Pulled the stable image and recreated the daemon.' };
+    }
     if (ENV) {
       return {
         skipped: true, mode: 'coinclaw',
@@ -527,6 +722,12 @@ const actions = {
 
   // ── status ─────────────────────────────────────────────────────
   status: async () => {
+    if (IS_DOCKER) {
+      const state = await fetchDaemonState();
+      let lastLogs = '';
+      try { lastLogs = dockerCompose(['logs', '--tail', '10', '--no-color', 'freqtrade']); } catch {}
+      return { mode: 'docker', engine: ENV.engine, ...state, last_logs: lastLogs };
+    }
     if (ENV) {
       const state = await fetchDaemonState();
       const result = { mode: 'coinclaw', engine: ENV.engine, ...state };
@@ -552,6 +753,10 @@ const actions = {
   // ── stop / start ───────────────────────────────────────────────
   // coinclaw 模式: supervisorctl. host 模式: SIGTERM pid.
   stop: async () => {
+    if (IS_DOCKER) {
+      dockerCompose(['stop', 'freqtrade'], { timeout: 60_000 });
+      return { stopped: true, mode: 'docker', method: 'docker compose stop' };
+    }
     if (ENV) {
       const sock = supervisorSocket();
       try {
@@ -569,6 +774,10 @@ const actions = {
   },
 
   start: async (params = {}) => {
+    if (IS_DOCKER) {
+      dockerCompose(['up', '-d', 'freqtrade'], { timeout: 60_000 });
+      return { started: true, mode: 'docker', method: 'docker compose up' };
+    }
     if (ENV) {
       const sock = supervisorSocket();
       try {
@@ -592,6 +801,13 @@ const actions = {
   // host 模式: tail freqtrade.log.
   logs: async ({ lines = 50 } = {}) => {
     const n = parseTailLines(lines);
+    if (IS_DOCKER) {
+      try {
+        return { mode: 'docker', logs: dockerCompose(['logs', '--tail', String(n), '--no-color', 'freqtrade']) };
+      } catch {
+        return { mode: 'docker', logs: 'No container logs available' };
+      }
+    }
     if (ENV) {
       for (const log of ['/workspace/logs/freqtrade.log', '/workspace/logs/freqtrade-error.log']) {
         if (existsSync(log)) {
@@ -607,9 +823,9 @@ const actions = {
   // ── backtest ───────────────────────────────────────────────────
   // 两边都用 freqtrade backtesting CLI; 区别只在路径.
   // coinclaw 模式跑 backtest 不影响 daemon: backtesting 走自己的进程,
-  // 跟 daemon 共用 user_data 但不共用 :8080.
+  // 跟 daemon 共用 user_data 但不共用 :8888.
   backtest: async (params = {}) => {
-    if (!existsSync(FT_BIN) && !ENV) throw new Error('Freqtrade not installed. Run deploy first.');
+    ensureHostFreqtradeInstalled();
     if (!existsSync(CONFIG_PATH)) {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
       const exchange = params.exchange || 'binance';
@@ -630,13 +846,17 @@ const actions = {
     const timerange = params.timerange || '';
     const pairs = params.pairs;
     const pairList = pairs ? (Array.isArray(pairs) ? pairs : [pairs]) : [];
+    const resultsDir = resolve(USER_DATA, 'backtest_results');
+    const previousResultFiles = new Set(backtestMetaFiles(resultsDir));
+    const strategyHash = strategyFingerprint(strategy);
+    if (!strategyHash) throw new Error(`Unable to fingerprint strategy: ${stratFile}`);
 
     console.error('Downloading historical data...');
     try {
       const args = ['download-data', '--config', CONFIG_PATH, '--timeframe', timeframe, '--userdir', USER_DATA];
       if (timerange) args.push('--timerange', timerange);
       if (pairList.length) args.push('-p', ...pairList);
-      runFile(FT_BIN, args, { timeout: 300000, env: proxyEnv() });
+      runFreqtrade(args, { timeout: 300000, env: proxyEnv() });
     } catch (e) {
       console.error(`Data download warning: ${e.message}`);
     }
@@ -652,19 +872,37 @@ const actions = {
     ];
     if (timerange) backtestArgs.push('--timerange', timerange);
     if (pairList.length) backtestArgs.push('-p', ...pairList);
-    const rawOutput = runFile(FT_BIN, backtestArgs, { timeout: 600000, env: proxyEnv() });
+    const rawOutput = runFreqtrade(backtestArgs, { timeout: 600000, env: proxyEnv() });
+    if (strategyFingerprint(strategy) !== strategyHash) {
+      throw new Error(`Strategy "${strategy}" changed during backtest. Run the backtest again for the current code.`);
+    }
+    const evidence = recordBacktestEvidence({
+      strategy,
+      strategyHash,
+      timeframe,
+      timerange,
+      pairs: pairList,
+      resultFile: findNewBacktestResult(resultsDir, previousResultFiles, strategy),
+    });
     const output = rawOutput
       .split('\n')
       .filter((l) => !l.includes('INFO') || l.includes('TOTAL') || l.includes('Result') || l.includes('trades') || l.includes('Profit') || l.includes('Drawdown') || l.includes('Win') || l.includes('Avg'))
       .join('\n')
       .replace(/\b127\.0\.0\.1:\d+\b/g, '[local]')
       .replace(/https?:\/\/\d+\.\d+\.\d+\.\d+:\d+/g, '[proxy]');
-    return { mode: ENV ? 'coinclaw' : 'host', strategy, timeframe, timerange: timerange || 'all available', output };
+    return {
+      mode: runtimeMode(),
+      strategy,
+      timeframe,
+      timerange: timerange || 'all available',
+      output,
+      evidence: { id: evidence.id, resultFile: evidence.resultFile, current: true },
+    };
   },
 
   // ── download_data ──────────────────────────────────────────────
   download_data: async (params = {}) => {
-    if (!existsSync(FT_BIN) && !ENV) throw new Error('Freqtrade not installed. Run deploy first.');
+    ensureHostFreqtradeInstalled();
     if (!existsSync(CONFIG_PATH)) {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
       const exchange = params.exchange || 'binance';
@@ -681,13 +919,13 @@ const actions = {
     console.error(`Downloading data: timeframe=${timeframe}${timerange ? `, timerange=${timerange}` : ''}...`);
     const args = ['download-data', '--config', CONFIG_PATH, '--timeframe', timeframe, '--userdir', USER_DATA];
     if (timerange) args.push('--timerange', timerange);
-    const output = runFile(FT_BIN, args, { timeout: 300000, env: proxyEnv() });
-    return { mode: ENV ? 'coinclaw' : 'host', timeframe, timerange: timerange || 'all available', output };
+    const output = runFreqtrade(args, { timeout: 300000, env: proxyEnv() });
+    return { mode: runtimeMode(), timeframe, timerange: timerange || 'all available', output };
   },
 
   // ── hyperopt ───────────────────────────────────────────────────
   hyperopt: async (params = {}) => {
-    if (!existsSync(FT_BIN) && !ENV) throw new Error('Freqtrade not installed.');
+    ensureHostFreqtradeInstalled();
     if (!existsSync(CONFIG_PATH)) {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
       const exchange = params.exchange || 'binance';
@@ -713,7 +951,7 @@ const actions = {
     try {
       const downloadArgs = ['download-data', '--config', CONFIG_PATH, '--timeframe', timeframe, '--userdir', USER_DATA];
       if (timerange) downloadArgs.push('--timerange', timerange);
-      runFile(FT_BIN, downloadArgs, { timeout: 300000, env: proxyEnv() });
+      runFreqtrade(downloadArgs, { timeout: 300000, env: proxyEnv() });
     } catch (e) { console.error(`Data download warning: ${e.message}`); }
 
     console.error(`Running hyperopt: strategy=${strategy}, epochs=${epochs}, jobs=${jobs}, spaces=${spaces}`);
@@ -731,9 +969,9 @@ const actions = {
       '--min-trades', String(minTrades),
     ];
     if (timerange) hyperoptArgs.push('--timerange', timerange);
-    const output = runFile(FT_BIN, hyperoptArgs, { timeout: 1800000, env: proxyEnv() });
+    const output = runFreqtrade(hyperoptArgs, { timeout: 1800000, env: proxyEnv() });
 
-    return { mode: ENV ? 'coinclaw' : 'host', strategy, timeframe, epochs, spaces, jobs, loss_function: lossFunc, output };
+    return { mode: runtimeMode(), strategy, timeframe, epochs, spaces, jobs, loss_function: lossFunc, output };
   },
 
   // ── create_strategy ────────────────────────────────────────────
@@ -770,7 +1008,7 @@ const actions = {
 
     const result = {
       success: true, strategy: name, file: dest,
-      mode: ENV ? 'coinclaw' : 'host', engine: ENV ? ENV.engine : null,
+      mode: runtimeMode(), engine: ENV ? ENV.engine : null,
       timeframe: tf, direction,
       indicators: indicators || ['rsi', 'bb', 'ema', 'volume_sma'],
       note: 'Pure technical indicator strategy. External market-intelligence data is not injected by this skill.',
@@ -793,11 +1031,15 @@ const actions = {
         }
       }
     }
-    return { mode: ENV ? 'coinclaw' : 'host', strategies: files, path: STRAT_DIR };
+    return { mode: runtimeMode(), strategies: files, path: STRAT_DIR };
   },
 
   // ── remove ─────────────────────────────────────────────────────
   remove: async () => {
+    if (IS_DOCKER) {
+      dockerCompose(['down'], { timeout: 60_000 });
+      return { removed: true, mode: 'docker', note: 'Container removed. User data and config preserved.' };
+    }
     if (ENV) {
       return {
         skipped: true, mode: 'coinclaw',
@@ -813,27 +1055,47 @@ const actions = {
   // ── backtest_results ───────────────────────────────────────────
   backtest_results: async () => {
     const resultsDir = resolve(USER_DATA, 'backtest_results');
-    if (!existsSync(resultsDir)) return { mode: ENV ? 'coinclaw' : 'host', results: [], path: resultsDir };
+    const currentHashes = new Map();
+    const evidence = readBacktestEvidence().map((record) => {
+      if (!currentHashes.has(record.strategy)) {
+        currentHashes.set(record.strategy, strategyFingerprint(record.strategy));
+      }
+      return {
+        id: record.id,
+        strategy: record.strategy,
+        timeframe: record.timeframe,
+        timerange: record.timerange,
+        pairs: Array.isArray(record.pairs) ? record.pairs : [],
+        resultFile: record.resultFile || null,
+        createdAt: record.createdAt,
+        current: Boolean(record.strategyHash && currentHashes.get(record.strategy) === record.strategyHash),
+        fingerprint: typeof record.strategyHash === 'string' ? record.strategyHash.slice(0, 12) : '',
+      };
+    });
+    if (!existsSync(resultsDir)) return { mode: runtimeMode(), results: [], evidence, path: resultsDir };
     const files = readdirSync(resultsDir)
       .filter((f) => f.endsWith('.meta.json'))
-      .map((f) => {
-        try {
-          const meta = JSON.parse(readFileSync(resolve(resultsDir, f), 'utf-8'));
-          const strategy = Object.keys(meta)[0] || 'unknown';
-          const info = meta[strategy] || {};
-          return {
-            file: f.replace('.meta.json', ''),
-            strategy,
-            timeframe: info.timeframe || '',
-            start: info.backtest_start_ts ? new Date(info.backtest_start_ts * 1000).toISOString().slice(0, 10) : '',
-            end: info.backtest_end_ts ? new Date(info.backtest_end_ts * 1000).toISOString().slice(0, 10) : '',
-          };
-        } catch { return null; }
-      })
+	      .map((f) => {
+	        try {
+	          const meta = JSON.parse(readFileSync(resolve(resultsDir, f), 'utf-8'));
+	          const strategy = Object.keys(meta)[0] || 'unknown';
+	          const info = meta[strategy] || {};
+	          const file = f.replace('.meta.json', '');
+	          const summary = firstStrategySummary(readBacktestPayload(resultsDir, file), strategy);
+	          return {
+	            file,
+	            strategy,
+	            timeframe: info.timeframe || '',
+	            start: info.backtest_start_ts ? new Date(info.backtest_start_ts * 1000).toISOString().slice(0, 10) : '',
+	            end: info.backtest_end_ts ? new Date(info.backtest_end_ts * 1000).toISOString().slice(0, 10) : '',
+	            ...backtestMetrics(summary),
+	          };
+	        } catch { return null; }
+	      })
       .filter(Boolean)
       .sort((a, b) => b.file.localeCompare(a.file))
       .slice(0, 10);
-    return { mode: ENV ? 'coinclaw' : 'host', results: files, path: resultsDir };
+    return { mode: runtimeMode(), results: files, evidence, path: resultsDir };
   },
 };
 

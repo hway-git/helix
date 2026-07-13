@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { LeftSidebar } from '@/components/trading/left-sidebar'
 import { CenterPanel } from '@/components/trading/center-panel'
 import { AgentChat } from '@/components/trading/agent-chat'
@@ -24,6 +24,13 @@ const MARKET_FALLBACK_REFRESH_MS = 120_000
 const INDICATOR_REFRESH_MS = 60_000
 const MAX_CANDLES = 500
 const WATCHLIST_STORAGE_KEY = 'helix.watchlist.instruments'
+
+type WatchlistResponse = {
+  ok: boolean
+  pairs?: TradingPair[]
+  instruments?: string[]
+  error?: string
+}
 
 function toApiInterval(timeframe: string) {
   return timeframe.toLowerCase()
@@ -66,6 +73,43 @@ function pairWithTickerUpdate(pair: TradingPair, update: OkxTickerUpdate): Tradi
   }
 }
 
+function readLegacyWatchlist() {
+  try {
+    const saved = window.localStorage.getItem(WATCHLIST_STORAGE_KEY)
+    if (!saved) return []
+
+    const instruments = JSON.parse(saved)
+    if (!Array.isArray(instruments)) return []
+
+    return instruments
+      .filter((value): value is string => typeof value === 'string')
+      .map(createOkxSwapPair)
+      .filter((pair): pair is TradingPair => pair != null)
+  } catch {
+    return []
+  }
+}
+
+async function persistWatchlist(pairs: TradingPair[]) {
+  const response = await fetch('/api/market/watchlist', {
+    method: 'PUT',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instruments: pairs.map((pair) => pair.instrumentId) }),
+  })
+  if (!response.ok) throw new Error(`自选接口 HTTP ${response.status}`)
+
+  const payload = (await response.json()) as WatchlistResponse
+  if (!payload.ok) throw new Error(payload.error ?? '自选接口不可用')
+  return payload.pairs ?? pairs
+}
+
+function streamProblemLabel(tickerStatus: string, candleStatus: string) {
+  const broken = [tickerStatus, candleStatus].filter((status) => status === 'reconnecting' || status === 'error')
+  if (broken.length === 0) return null
+  return `行情 WS ${broken.includes('error') ? '异常' : '重连中'}`
+}
+
 export default function Page() {
   const [activeSymbol, setActiveSymbol] = useState('BTC/USDT')
   const [timeframe, setTimeframe] = useState('15m')
@@ -77,29 +121,54 @@ export default function Page() {
   const [marketError, setMarketError] = useState<string | null>(null)
   const [indicatorLoading, setIndicatorLoading] = useState(true)
   const [indicatorError, setIndicatorError] = useState<string | null>(null)
+  const [snapshotRefreshKey, setSnapshotRefreshKey] = useState(0)
+  const previousStreamLiveRef = useRef(false)
   const instrumentsParam = useMemo(
     () => watchlistPairs.map((pair) => pair.instrumentId).join(','),
     [watchlistPairs],
   )
 
   useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem(WATCHLIST_STORAGE_KEY)
-      if (!saved) return
+    let disposed = false
+    const controller = new AbortController()
 
-      const instruments = JSON.parse(saved)
-      if (!Array.isArray(instruments)) return
+    const loadWatchlist = async () => {
+      try {
+        const response = await fetch('/api/market/watchlist', {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+        if (!response.ok) throw new Error(`自选接口 HTTP ${response.status}`)
 
-      const savedPairs = instruments
-        .filter((value): value is string => typeof value === 'string')
-        .map(createOkxSwapPair)
-        .filter((pair): pair is TradingPair => pair != null)
+        const payload = (await response.json()) as WatchlistResponse
+        if (!payload.ok) throw new Error(payload.error ?? '自选接口不可用')
+        if (disposed) return
 
-      if (savedPairs.length > 0) {
-        setWatchlistPairs(mergeTradingPairs([...TRADING_PAIRS, ...savedPairs]))
+        const serverPairs = payload.pairs?.length ? payload.pairs : TRADING_PAIRS
+        const legacyPairs = readLegacyWatchlist()
+        const nextPairs = legacyPairs.length > 0
+          ? mergeTradingPairs([...serverPairs, ...legacyPairs])
+          : mergeTradingPairs(serverPairs)
+
+        setWatchlistPairs(nextPairs)
+
+        if (legacyPairs.length > 0) {
+          window.localStorage.removeItem(WATCHLIST_STORAGE_KEY)
+          void persistWatchlist(nextPairs).catch((error) => {
+            setMarketError(error instanceof Error ? error.message : '自选同步失败')
+          })
+        }
+      } catch (error) {
+        if (disposed || (error instanceof DOMException && error.name === 'AbortError')) return
+        setMarketError(error instanceof Error ? error.message : '自选接口不可用')
       }
-    } catch {
-      // Ignore invalid local watchlist state.
+    }
+
+    void loadWatchlist()
+
+    return () => {
+      disposed = true
+      controller.abort()
     }
   }, [])
 
@@ -144,7 +213,7 @@ export default function Page() {
       controller?.abort()
       window.clearInterval(timer)
     }
-  }, [activeSymbol, instrumentsParam, timeframe])
+  }, [activeSymbol, instrumentsParam, snapshotRefreshKey, timeframe])
 
   useEffect(() => {
     let disposed = false
@@ -211,13 +280,16 @@ export default function Page() {
   }, [activePair.change, activePair.price, activePair.symbol])
 
   const handleAddPair = useCallback((pair: TradingPair) => {
-    setWatchlistPairs((current) => {
-      const next = mergeTradingPairs([...current, pair])
-      window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(next.map((item) => item.instrumentId)))
-      return next
-    })
+    const next = mergeTradingPairs([...watchlistPairs, pair])
+    setWatchlistPairs(next)
     setActiveSymbol(pair.symbol)
-  }, [])
+
+    void persistWatchlist(next).then((serverPairs) => {
+      setWatchlistPairs(mergeTradingPairs(serverPairs))
+    }).catch((error) => {
+      setMarketError(error instanceof Error ? error.message : '自选同步失败')
+    })
+  }, [watchlistPairs])
 
   const handleTickerUpdate = useCallback((update: OkxTickerUpdate) => {
     setSnapshot((current) => {
@@ -277,7 +349,7 @@ export default function Page() {
     })
   }, [])
 
-  useOkxMarketStream({
+  const stream = useOkxMarketStream({
     pairs,
     activePair,
     timeframe,
@@ -285,9 +357,48 @@ export default function Page() {
     onCandle: handleCandleUpdate,
   })
 
+  useEffect(() => {
+    const streamLive = stream.tickerStatus === 'live' && stream.candleStatus === 'live'
+    const problem = streamProblemLabel(stream.tickerStatus, stream.candleStatus)
+
+    if (problem) {
+      setSnapshot((current) => {
+        if (!current) return current
+        const errors = current.source.errors.includes(problem)
+          ? current.source.errors
+          : [problem, ...current.source.errors].slice(0, 4)
+
+        return {
+          ...current,
+          pairs: current.pairs.map((pair) => ({ ...pair, stale: true })),
+          activePair: { ...current.activePair, stale: true },
+          source: {
+            ...current.source,
+            status: 'partial',
+            errors,
+          },
+        }
+      })
+    }
+
+    if (streamLive && !previousStreamLiveRef.current) {
+      setSnapshotRefreshKey((value) => value + 1)
+    }
+    previousStreamLiveRef.current = streamLive
+  }, [stream.candleStatus, stream.tickerStatus])
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-      <TerminalStatusBar source={snapshot?.source ?? null} loading={marketLoading} error={marketError} />
+      <TerminalStatusBar
+        source={snapshot?.source ?? null}
+        loading={marketLoading}
+        error={marketError}
+        stream={{
+          tickerStatus: stream.tickerStatus,
+          candleStatus: stream.candleStatus,
+          lastMessageAt: stream.lastMessageAt,
+        }}
+      />
 
       <div className="flex min-h-0 flex-1 flex-col">
         <div

@@ -1,14 +1,18 @@
 // CoinClaw 三引擎(OpenClaw / Hermes / Claude Code)自动识别 helper.
 //
-// CoinClaw 把 freqtrade 起为 supervisord 管理的常驻 daemon, 端口 8080,
+// CoinClaw 把 freqtrade 起为 supervisord 管理的常驻 daemon, 默认端口 8888,
 // Basic auth 用户名 'freqtrade', 密码写在容器内的 .ft_api_pass 文件.
 // 三引擎的 workspace / userdir / strategy-path / config.json / .env 都
 // 在不同位置, 但本 helper 屏蔽差异 — skill 脚本只关心 coinclawEnv() 返回值.
 //
-// 不在 CoinClaw 容器里运行(用户本地 macOS / Linux)时, coinclawEnv() 返回
-// null, ft-deploy.mjs 会走 host 模式 (自己 git clone freqtrade + setup.sh).
+// 不在 CoinClaw 容器里运行时, coinclawEnv() 返回 null. 本机安装器会通过
+// HELIX_FREQTRADE_RUNTIME=docker 启用 Docker; 否则 ft-deploy.mjs 走 host 模式.
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const LOCAL_DOCKER_COMPOSE = resolve(MODULE_DIR, '../../../docker/freqtrade/compose.yaml');
 
 // 三引擎的真实 daemon 路径(--strategy-path / --userdir / --config 等都来自
 // image-*/freqtrade-launch.sh 或 image/freqtrade-wait.sh 的 exec 行).
@@ -57,7 +61,11 @@ export function coinclawEnv() {
   // 再匹配 .claude (CC), 最后兜底到 OpenClaw.
   for (const env of ENGINES) {
     if (existsSync(env.sentinelFile) && existsSync(env.configPath)) {
-      _cached = { ...env, ftApiUser: 'freqtrade', ftApiUrl: 'http://127.0.0.1:8080' };
+      _cached = {
+        ...env,
+        ftApiUser: 'freqtrade',
+        ftApiUrl: process.env.FREQTRADE_URL || process.env.FT_API_URL || 'http://127.0.0.1:8888',
+      };
       return _cached;
     }
   }
@@ -65,6 +73,31 @@ export function coinclawEnv() {
   // 但 sentinel 是 .hermes/.claude 而不是 .openclaw — 不会误识别成 OpenClaw.
   _cached = null;
   return null;
+}
+
+export function dockerFreqtradeEnv() {
+  if (process.env.HELIX_FREQTRADE_RUNTIME !== 'docker') return null;
+
+  const home = process.env.HOME || '';
+  const host = hostModeFreqtradePaths();
+  return {
+    engine: 'docker',
+    workspaceRoot: resolve(home, '.freqtrade'),
+    skillsRoot: resolve(MODULE_DIR, '..'),
+    freqtradeUserdir: host.userdir,
+    strategyPath: host.strategyPath,
+    configPath: host.configPath,
+    envFile: resolve(home, '.helix', '.env'),
+    ftPassFile: resolve(home, '.helix', '.ft_api_pass'),
+    composeFile: LOCAL_DOCKER_COMPOSE,
+    containerUserdir: '/freqtrade/user_data',
+    ftApiUser: process.env.FREQTRADE_USERNAME || 'freqtrade',
+    ftApiUrl: process.env.FREQTRADE_URL || process.env.FT_API_URL || 'http://127.0.0.1:8888',
+  };
+}
+
+export function managedFreqtradeEnv() {
+  return coinclawEnv() || dockerFreqtradeEnv();
 }
 
 // 读 ft_api_pass 文件. 三引擎的 entrypoint.sh 都在第一次启动写一次,

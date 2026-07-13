@@ -147,6 +147,98 @@ export type IndicatorSnapshot = {
   source: IndicatorSource
 }
 
+export type IntradaySignalTimeframe = '5m' | '15m' | '1h'
+export type IntradaySignalDirection = 'long' | 'short' | 'neutral'
+export type IntradaySignalStatus = 'actionable' | 'watch' | 'insufficient-data'
+export type IntradayConfidenceLevel = 'low' | 'medium' | 'high' | 'very-high'
+
+export type IntradayTimeframeAnalysis = {
+  timeframe: IntradaySignalTimeframe
+  latestTime: number
+  close: number
+  atr: number
+  macd: {
+    value: number
+    signal: number
+    histogram: number
+    momentum: 'bullish' | 'bearish' | 'mixed'
+    cross: 'bullish' | 'bearish' | 'none'
+    crossBarsAgo?: number
+    divergence: 'bullish' | 'bearish' | 'none'
+    divergenceBarsAgo?: number
+  }
+  rsi: {
+    value: number
+    state: 'overbought' | 'oversold' | 'neutral'
+    recovery: 'bullish' | 'bearish' | 'none'
+    recoveryBarsAgo?: number
+  }
+  volume: {
+    value: number
+    average: number
+    ratio: number
+    state: 'expanding' | 'normal' | 'weak'
+  }
+  priceAction: {
+    structureHigh: 'higher' | 'lower' | 'equal' | 'unknown'
+    structureLow: 'higher' | 'lower' | 'equal' | 'unknown'
+    event:
+      | 'bullish-break'
+      | 'bearish-break'
+      | 'bullish-retest'
+      | 'bearish-retest'
+      | 'bullish-rejection'
+      | 'bearish-rejection'
+      | 'bullish-sweep'
+      | 'bearish-sweep'
+      | 'ambiguous'
+      | 'none'
+    eventBarsAgo?: number
+    eventLevel?: number
+    latestSwingHigh?: number
+    latestSwingLow?: number
+  }
+}
+
+export type IntradayTradeSignal = {
+  status: IntradaySignalStatus
+  side: IntradaySignalDirection
+  bias: {
+    side: IntradaySignalDirection
+    confidence: number
+    logic: string[]
+  }
+  confidence: number
+  confidenceLevel: IntradayConfidenceLevel
+  entry?: {
+    price: number
+    zoneLow: number
+    zoneHigh: number
+    timeframe: Exclude<IntradaySignalTimeframe, '1h'>
+  }
+  stopLoss?: {
+    price: number
+    basis: string
+  }
+  triggeredAt?: number
+  logic: string[]
+  warnings: string[]
+}
+
+export type IntradaySignalSnapshot = {
+  ok: boolean
+  activeSymbol: string
+  generatedAt: number
+  signal: IntradayTradeSignal
+  timeframes: Partial<Record<IntradaySignalTimeframe, IntradayTimeframeAnalysis>>
+  source: {
+    name: string
+    status: 'live' | 'partial' | 'offline'
+    fetchedAt: number
+    errors: string[]
+  }
+}
+
 export const TRADING_PAIRS: TradingPair[] = [
   { symbol: 'BTC/USDT', base: 'BTC', quote: 'USDT', instrumentId: 'BTC-USDT-SWAP', market: 'okx', contractType: 'perpetual', price: 0, change: 0, volume: '--', sparkline: [] },
   { symbol: 'ETH/USDT', base: 'ETH', quote: 'USDT', instrumentId: 'ETH-USDT-SWAP', market: 'okx', contractType: 'perpetual', price: 0, change: 0, volume: '--', sparkline: [] },

@@ -2,13 +2,15 @@
   "name": "helix",
   "version": "2.0.0",
   "private": true,
-  "description": "Helix skills for AI coding assistants — exchange account access, CEX trading execution, and Freqtrade strategy automation",
+  "description": "Helix skills for AI coding assistants — exchange access, CEX execution, Price Action specifications, and Freqtrade automation",
   "keywords": [
     "claude-code",
     "skills",
     "crypto",
     "trading",
     "freqtrade",
+    "price-action",
+    "strategy",
     "account",
     "execution",
     "helix",
@@ -31,9 +33,11 @@
   ],
   "scripts": {
     "validate": "node scripts/validate-skills.mjs",
+    "freqtrade:install": "node docker/freqtrade/install.mjs",
+    "test:freqtrade": "node --test skills/helix-freqtrade/tests/*.test.mjs",
     "verify-orders": "node skills/helix-trading/scripts/verify-order-matrix.mjs",
     "prepublishOnly": "node scripts/validate-skills.mjs",
-    "postinstall": "echo '\\n  helix skills installed!\\n  Skills: helix-account, helix-trading, helix-freqtrade\\n  Docs: README.md\\n'"
+    "postinstall": "echo '\\n  helix skills installed!\\n  Skills: helix-account, helix-trading, helix-pa-strategy, helix-freqtrade\\n  Docs: README.md\\n'"
   },
   "engines": {
     "node": ">=18"

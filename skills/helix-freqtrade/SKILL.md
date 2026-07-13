@@ -10,9 +10,11 @@ Freqtrade strategy generation, backtesting, deployment, and daemon control.
 
 ## Core Rules
 
-- In CoinClaw containers, Freqtrade is already managed by supervisord on `127.0.0.1:8080`. Do not start another process.
+- In CoinClaw containers, Freqtrade is already managed by supervisord on `127.0.0.1:8888`. Do not start another process.
+- In local Docker mode, use `docker/freqtrade/compose.yaml` through `ft-deploy.mjs`; do not install or start a second host daemon.
 - Use `ft.mjs` and `ft-deploy.mjs`; do not manually edit daemon state without reloading or restarting through scripts.
 - Strategy generation is technical-indicator based. Do not inject fake external data into strategies or backtests.
+- Deploy only through `ft-deploy.mjs deploy`. It requires backtest evidence for the exact current strategy code; editing the strategy invalidates older evidence.
 - Switching live mode requires explicit confirmation.
 - Answer PnL questions from `ft.mjs profit`, not from open trades alone.
 
@@ -39,14 +41,12 @@ node scripts/ft.mjs profit
 node scripts/ft.mjs trades_open
 node scripts/ft.mjs balance
 node scripts/ft.mjs set_pairs '{"pairs":["BTC/USDT:USDT","ETH/USDT:USDT"]}'
-node scripts/ft.mjs set_strategy '{"strategy":"RSIStrategy"}'
-node scripts/ft.mjs restart
 
 node scripts/ft-deploy.mjs strategy_list
 node scripts/ft-deploy.mjs create_strategy '{"name":"RSIStrategy","timeframe":"15m","indicators":["rsi","macd"],"direction":"long"}'
 node scripts/ft-deploy.mjs backtest '{"strategy":"RSIStrategy","timeframe":"15m","timerange":"20250101-20260301"}'
 node scripts/ft-deploy.mjs hyperopt '{"strategy":"RSIStrategy","timeframe":"1h","epochs":100}'
-node scripts/ft-deploy.mjs deploy '{"strategy":"RSIStrategy"}'
+node scripts/ft-deploy.mjs deploy '{"strategy":"RSIStrategy","dry_run":true}'
 node scripts/ft-deploy.mjs logs '{"lines":100}'
 ```
 
@@ -64,9 +64,10 @@ Direction:
 - `short`: short only
 - `both`: long and short
 
-For custom logic, write a Python strategy file directly into the daemon strategy directory, then deploy it with:
+For custom logic, write a Python strategy file directly into the daemon strategy directory, backtest that exact code, then deploy it:
 
 ```bash
+node scripts/ft-deploy.mjs backtest '{"strategy":"MyStrategy","timeframe":"15m"}'
 node scripts/ft-deploy.mjs deploy '{"strategy":"MyStrategy"}'
 ```
 
@@ -74,9 +75,9 @@ node scripts/ft-deploy.mjs deploy '{"strategy":"MyStrategy"}'
 
 | Operation | Command | Restart |
 |---|---|---|
-| Switch strategy | `ft.mjs set_strategy {"strategy":"X"}` | yes |
+| Switch strategy | `ft-deploy.mjs deploy {"strategy":"X","dry_run":true}` | yes |
 | Switch pairs | `ft.mjs set_pairs {"pairs":[...]}` | reload only |
-| Switch live / dry-run | `ft.mjs set_dry_run {"dry_run":false}` | yes |
+| Switch live / dry-run | `ft-deploy.mjs deploy {"strategy":"X","dry_run":false}` | yes |
 | Reload config | `ft.mjs reload` | no |
 
 ## Manual Force Actions
