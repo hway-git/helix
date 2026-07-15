@@ -45,7 +45,7 @@ Helix skill 层当前只包含 3 个能力:
 - 改杠杆、保证金模式、切实盘前必须明确说明影响并等待用户确认。
 - Freqtrade daemon 自己根据策略自动开平仓是 daemon 本职; 用户切实盘那一刻视为授权, 不需要 agent 对每笔策略信号再确认。
 - 策略部署、切策略和切 dry-run / live 统一走 `helix-freqtrade/scripts/ft-deploy.mjs deploy`; 当前策略代码必须先有匹配的回测指纹，且回测至少有一笔交易并为正收益；修改策略后必须重新回测。
-- `HelixIntradayStrategy` 必须遵守 `docs/PA_CORE_SPEC.md` 和 `docs/STRATEGY_DESIGN.md`：Brooks PA 决定 context/setup/expectation，EMA/MACD/RSI 只能验证或反对 hypothesis，不能独立触发交易。
+- `HelixSignalStrategy` 只能校验并消费 Helix Signal Artifact，不得在 Python 中复制 Scalp Hunter V1 或 Swing Hunter V1 规则。新策略的 manifest、语义文档、参数、policy、测试和 proposal 只允许维护在 sibling `helix-strategies` 仓库；`proposal` 不得部署。
 
 ## 安全规则
 

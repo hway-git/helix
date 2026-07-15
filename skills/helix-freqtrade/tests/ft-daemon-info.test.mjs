@@ -12,6 +12,29 @@ import test from 'node:test';
 const execFileAsync = promisify(execFile);
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+function sha256(content) {
+  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
+}
+
+async function writeBacktestFiles(resultsDir, strategy, summary, base = 'backtest-result-test') {
+  const resultFile = `${base}.json`;
+  const resultMetaFile = `${base}.meta.json`;
+  const resultContent = JSON.stringify({ strategy: { [strategy]: summary } });
+  const resultMetaContent = JSON.stringify({ [strategy]: { run_id: 'test-run', timeframe: '5m' } });
+  await writeFile(join(resultsDir, resultFile), resultContent);
+  await writeFile(join(resultsDir, resultMetaFile), resultMetaContent);
+  return {
+    evidence: {
+      resultFile,
+      resultMetaFile,
+      resultHash: sha256(resultContent),
+      resultMetaHash: sha256(resultMetaContent),
+    },
+    resultContent,
+    resultMetaContent,
+  };
+}
+
 async function listen(handler) {
   const server = createServer(handler);
   await new Promise((resolveListen, reject) => {
@@ -108,8 +131,13 @@ test('backtest evidence becomes stale after strategy code changes', async (t) =>
   await mkdir(strategyDir, { recursive: true });
   await mkdir(resultsDir, { recursive: true });
   await writeFile(strategyFile, initialCode);
+  const backtestFiles = await writeBacktestFiles(resultsDir, 'TestStrategy', {
+    total_trades: 5,
+    profit_total: 0.01,
+    profit_total_abs: 10,
+  }, 'backtest-result-staleness');
   await writeFile(join(resultsDir, '.helix-evidence.json'), JSON.stringify({
-    version: 1,
+    version: 2,
     records: [{
       id: 'test-evidence',
       strategy: 'TestStrategy',
@@ -117,7 +145,7 @@ test('backtest evidence becomes stale after strategy code changes', async (t) =>
       timeframe: '15m',
       timerange: '20250101-20251231',
       pairs: ['BTC/USDT:USDT'],
-      resultFile: null,
+      ...backtestFiles.evidence,
       createdAt: '2026-01-01T00:00:00.000Z',
     }],
   }));
@@ -167,20 +195,27 @@ test('deploy rejects empty or non-profitable backtest evidence', async (t) => {
     cwd: SKILL_DIR,
     env: { ...process.env, HOME: home, HELIX_FREQTRADE_RUNTIME: '' },
   });
-  const writeEvidence = (metrics) => writeFile(join(resultsDir, '.helix-evidence.json'), JSON.stringify({
-    version: 1,
-    records: [{
-      id: 'quality-gate-evidence',
-      strategy: 'TestStrategy',
-      strategyHash: createHash('sha256').update(code).digest('hex'),
-      timeframe: '5m',
-      timerange: '20260101-20260201',
-      pairs: ['BTC/USDT:USDT'],
-      resultFile: null,
-      metrics,
-      createdAt: '2026-01-01T00:00:00.000Z',
-    }],
-  }));
+  const writeEvidence = async (actualMetrics, recordedMetrics = actualMetrics) => {
+    const files = await writeBacktestFiles(resultsDir, 'TestStrategy', {
+      total_trades: actualMetrics.trades,
+      profit_total: actualMetrics.profitPct,
+      profit_total_abs: actualMetrics.profitAbs ?? actualMetrics.profitPct * 1000,
+    });
+    await writeFile(join(resultsDir, '.helix-evidence.json'), JSON.stringify({
+      version: 2,
+      records: [{
+        id: 'quality-gate-evidence',
+        strategy: 'TestStrategy',
+        strategyHash: createHash('sha256').update(code).digest('hex'),
+        timeframe: '5m',
+        timerange: '20260101-20260201',
+        pairs: ['BTC/USDT:USDT'],
+        ...files.evidence,
+        metrics: recordedMetrics,
+        createdAt: '2026-01-01T00:00:00.000Z',
+      }],
+    }));
+  };
 
   await writeEvidence({ trades: 0, profitPct: 0 });
   await assert.rejects(deploy(), (error) => {
@@ -193,6 +228,94 @@ test('deploy rejects empty or non-profitable backtest evidence', async (t) => {
   await assert.rejects(deploy(), (error) => {
     assert.equal(error.code, 1);
     assert.match(error.stderr, /is not profitable \(-0\.84%\)/);
+    return true;
+  });
+
+  await writeEvidence(
+    { trades: 3, profitPct: -0.012 },
+    { trades: 999, profitPct: 99 },
+  );
+  await assert.rejects(deploy(), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /is not profitable \(-1\.20%\)/);
+    return true;
+  });
+});
+
+test('deploy rejects missing or tampered backtest result files', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'helix-evidence-integrity-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const userData = join(home, '.freqtrade', 'user_data');
+  const strategyDir = join(userData, 'strategies');
+  const resultsDir = join(userData, 'backtest_results');
+  const code = 'class TestStrategy:\n    pass\n';
+  await mkdir(strategyDir, { recursive: true });
+  await mkdir(resultsDir, { recursive: true });
+  await writeFile(join(strategyDir, 'TestStrategy.py'), code);
+  const files = await writeBacktestFiles(resultsDir, 'TestStrategy', {
+    total_trades: 4,
+    profit_total: 0.02,
+    profit_total_abs: 20,
+  }, 'backtest-result-integrity');
+  const evidenceFile = join(resultsDir, '.helix-evidence.json');
+  const writeEvidence = (overrides = {}) => writeFile(evidenceFile, JSON.stringify({
+    version: 2,
+    records: [{
+      id: 'integrity-evidence',
+      strategy: 'TestStrategy',
+      strategyHash: createHash('sha256').update(code).digest('hex'),
+      timeframe: '5m',
+      timerange: '20260101-20260201',
+      pairs: ['BTC/USDT:USDT'],
+      ...files.evidence,
+      ...overrides,
+      metrics: { trades: 4, profitPct: 0.02 },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }],
+  }));
+  const deploy = () => execFileAsync(process.execPath, [
+    'scripts/ft-deploy.mjs',
+    'deploy',
+    '{"strategy":"TestStrategy","dry_run":true}',
+  ], {
+    cwd: SKILL_DIR,
+    env: { ...process.env, HOME: home, HELIX_FREQTRADE_RUNTIME: '' },
+  });
+  const backtestResults = async () => {
+    const { stdout } = await execFileAsync(process.execPath, [
+      'scripts/ft-deploy.mjs',
+      'backtest_results',
+    ], {
+      cwd: SKILL_DIR,
+      env: { ...process.env, HOME: home, HELIX_FREQTRADE_RUNTIME: '' },
+    });
+    return JSON.parse(stdout);
+  };
+
+  await writeEvidence({ resultFile: null });
+  await assert.rejects(deploy(), (error) => {
+    assert.match(error.stderr, /has no result file/);
+    return true;
+  });
+
+  await writeEvidence();
+  await rm(join(resultsDir, files.evidence.resultFile));
+  await assert.rejects(deploy(), (error) => {
+    assert.match(error.stderr, /result file is missing/);
+    return true;
+  });
+
+  await writeFile(join(resultsDir, files.evidence.resultFile), `${files.resultContent}\n`);
+  await assert.rejects(deploy(), (error) => {
+    assert.match(error.stderr, /result hash mismatch/);
+    return true;
+  });
+  assert.equal((await backtestResults()).evidence[0].current, false);
+
+  await writeFile(join(resultsDir, files.evidence.resultFile), files.resultContent);
+  await writeFile(join(resultsDir, files.evidence.resultMetaFile), `${files.resultMetaContent}\n`);
+  await assert.rejects(deploy(), (error) => {
+    assert.match(error.stderr, /result metadata hash mismatch/);
     return true;
   });
 });
@@ -209,8 +332,13 @@ test('live deploy enforces every authorization and risk gate', async (t) => {
   await mkdir(strategyDir, { recursive: true });
   await mkdir(resultsDir, { recursive: true });
   await writeFile(strategyFile, code);
+  const backtestFiles = await writeBacktestFiles(resultsDir, 'TestStrategy', {
+    total_trades: 20,
+    profit_total: 0.015,
+    profit_total_abs: 15,
+  }, 'backtest-result-live-gate');
   await writeFile(join(resultsDir, '.helix-evidence.json'), JSON.stringify({
-    version: 1,
+    version: 2,
     records: [{
       id: 'live-gate-evidence',
       strategy: 'TestStrategy',
@@ -218,7 +346,7 @@ test('live deploy enforces every authorization and risk gate', async (t) => {
       timeframe: '5m',
       timerange: '20260101-20260201',
       pairs: ['BTC/USDT:USDT'],
-      resultFile: null,
+      ...backtestFiles.evidence,
       metrics: { trades: 20, profitPct: 1.5 },
       createdAt: '2026-01-01T00:00:00.000Z',
     }],

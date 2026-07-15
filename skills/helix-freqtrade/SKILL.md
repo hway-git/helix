@@ -13,21 +13,20 @@ Freqtrade strategy generation, backtesting, deployment, and daemon control.
 - In CoinClaw containers, Freqtrade is already managed by supervisord on `127.0.0.1:8888`. Do not start another process.
 - In local Docker mode, use `docker/freqtrade/compose.yaml` through `ft-deploy.mjs`; do not install or start a second host daemon.
 - Use `ft.mjs` and `ft-deploy.mjs`; do not manually edit daemon state without reloading or restarting through scripts.
-- `create_strategy` is only for simple indicator prototypes. Production changes to `HelixIntradayStrategy` must follow `../../docs/PA_CORE_SPEC.md` and `../../docs/STRATEGY_DESIGN.md`.
+- `create_strategy` is only for independent indicator prototypes. New Scalp Hunter V1 and Swing Hunter V1 strategy changes belong only in the sibling `helix-strategies` repository. Their Engine decisions reach Freqtrade only through `HelixSignalStrategy` and a verified Signal Artifact.
 - Deploy only through `ft-deploy.mjs deploy`. It requires backtest evidence for the exact current strategy code with at least one trade and positive total profit; editing the strategy invalidates older evidence.
 - LIVE mode requires all of: current backtest evidence, `HELIX_LIVE_TRADING_ENABLED=true`, valid exchange credentials, `max_open_trades <= 2`, and a fresh Dashboard live authorization session. Never ask the user to paste the live token in chat.
 - Do not use direct agent auto-entry. Strategy-driven entries must come from the Freqtrade daemon.
 - Use `emergency_stop` for the safety path. It force-exits all open trades before stopping the daemon and does not require a live session.
 - Answer PnL questions from `ft.mjs profit`, not from open trades alone.
 
-## Helix Strategy Contract
+## Strategy Ownership
 
-- Brooks PA owns market context, setup, expectation, signal bar, and invalidation.
-- EMA20 describes trend location and pullback context. MACD describes momentum phase. RSI uses the 55/45 control regime.
-- EMA, MACD, RSI, and divergence may support or oppose an existing PA hypothesis; none may create an entry by itself.
-- Current executable setups are H2/L2 second entries, breakout pullbacks, and failed breakouts at range edges.
-- Evaluate closed candles only. Confirmed swings become available at their confirmation bar; never backdate them or infer intrabar event order from OHLC.
-- Every strategy edit invalidates prior backtest evidence and must pass the strategy tests before a new backtest. Zero-trade or non-profitable evidence cannot be deployed.
+- Treat `HelixSignalStrategy` as an execution adapter only. Never add indicators, detectors, state machines, or Scalp/Swing rules to it.
+- Read Scalp Hunter V1 and Swing Hunter V1 semantics from the exact pinned `helix-strategies` commit; do not reproduce or override those semantics here.
+- Evaluate closed candles only. Confirmed events become available at their confirmation bar; never backdate them or infer intrabar event order from OHLC.
+- Every adapter edit invalidates prior backtest evidence. Helix deployment also requires matching artifact identity, positive non-empty backtest evidence, and a deployable lifecycle (`shadow+` for dry-run, `canary+` for live).
+- Backtest a Signal Artifact only with its exact `helix.market-dataset/v1` file. The dataset hash, symbol, market window, provider, and base-timeframe OHLCV must match; never download or substitute exchange data for this path.
 
 ## Dashboard Alignment
 
@@ -59,6 +58,8 @@ node scripts/ft-deploy.mjs create_strategy '{"name":"RSIStrategy","timeframe":"1
 node scripts/ft-deploy.mjs backtest '{"strategy":"RSIStrategy","timeframe":"15m","timerange":"20250101-20260301"}'
 node scripts/ft-deploy.mjs hyperopt '{"strategy":"RSIStrategy","timeframe":"1h","epochs":100}'
 node scripts/ft-deploy.mjs deploy '{"strategy":"RSIStrategy","dry_run":true}'
+node scripts/ft-deploy.mjs backtest '{"signal_artifact":"/path/to/artifact.json","market_dataset":"/path/to/dataset.json"}'
+node scripts/ft-deploy.mjs deploy '{"signal_artifact":"/path/to/artifact.json","dry_run":true}'
 node scripts/ft-deploy.mjs logs '{"lines":100}'
 ```
 
@@ -76,7 +77,7 @@ Direction:
 - `short`: short only
 - `both`: long and short
 
-For custom logic, write a Python strategy file directly into the daemon strategy directory, backtest that exact code, then deploy it:
+For independent prototypes, write a Python strategy file directly into the daemon strategy directory, backtest that exact code, then deploy it. Do not use this path for Scalp Hunter or Swing Hunter:
 
 ```bash
 node scripts/ft-deploy.mjs backtest '{"strategy":"MyStrategy","timeframe":"15m"}'
@@ -104,4 +105,5 @@ The Freqtrade daemon's own strategy-driven entries/exits do not require per-trad
 - Do not answer PnL from `/status` only.
 - Do not start `freqtrade trade` manually.
 - Do not use random or synthetic data as real backtest input.
+- Do not pass `timerange` for Signal Artifact backtests; their immutable dataset defines the complete window.
 - Do not print `.env` or `.ft_api_pass`.

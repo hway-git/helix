@@ -6,7 +6,7 @@ Repository guidance for agents working on Helix.
 
 Helix is an AI trading terminal with:
 
-- `app/dashboard`: frontend trading dashboard
+- `dashboard`: frontend trading dashboard
 - `skills/helix-account`: exchange account reads
 - `skills/helix-trading`: CEX execution
 - `skills/helix-freqtrade`: Freqtrade strategy, backtest, deploy, and daemon control
@@ -23,17 +23,11 @@ Do not add speculative abstractions or broad rewrites. Keep changes targeted to 
 
 Dashboard servers bind to loopback by default. Remote deployments must configure a `HELIX_CONTROL_TOKEN` of at least 24 characters and preserve the control-session guard on every mutating API route.
 
-## Strategy Core
+## Strategy Ownership
 
-Use `docs/PA_CORE_SPEC.md` and `docs/STRATEGY_DESIGN.md` as the implementation contract for `HelixIntradayStrategy`.
+`HelixSignalStrategy` is a thin Freqtrade adapter. It may validate and map immutable Helix Signal Artifacts but must not reproduce Scalp Hunter V1 or Swing Hunter V1 semantics in Python.
 
-Rules:
-
-- Use the Al Brooks market-cycle, setup, expectation, and signal-bar model; do not introduce ICT or SMC concepts.
-- Evaluate closed bars only and preserve both event time and confirmation time.
-- Never use future bars, repaint old output, or infer intrabar ordering from OHLC.
-- PA context and setup must exist before EMA, MACD, or RSI evidence can arm a trade hypothesis.
-- Implement, backtest, and deploy strategy changes through `helix-freqtrade`.
+New strategy manifests, semantic documentation, parameters, policies, tests, and proposals live only in the sibling `helix-strategies` repository. Helix owns deterministic Engine semantics, state machines, journal, replay, risk, execution, and read-only strategy-repository integration. Never deploy a `proposal` manifest to production.
 
 ## Freqtrade
 

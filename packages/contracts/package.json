@@ -7,7 +7,10 @@
     "./agent": "./src/agent.ts",
     "./account": "./src/account.ts",
     "./freqtrade": "./src/freqtrade.ts",
-    "./market": "./src/market.ts"
+    "./market": "./src/market.ts",
+    "./scalp": "./src/scalp.ts",
+    "./strategy": "./src/strategy.ts",
+    "./swing": "./src/swing.ts"
   },
   "devDependencies": {
     "typescript": "5.7.3"

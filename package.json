@@ -39,6 +39,8 @@
     "validate": "node scripts/validate-skills.mjs",
     "freqtrade:install": "node docker/freqtrade/install.mjs",
     "test:freqtrade": "node --test skills/helix-freqtrade/tests/*.test.mjs",
+    "strategy:history": "pnpm --filter @helix/core strategy:history",
+    "strategy:backtest": "pnpm --filter @helix/core strategy:backtest",
     "verify-orders": "node skills/helix-trading/scripts/verify-order-matrix.mjs",
     "prepublishOnly": "node scripts/validate-skills.mjs",
     "postinstall": "echo '\\n  helix skills installed!\\n  Skills: helix-account, helix-trading, helix-freqtrade\\n  Docs: README.md\\n'"

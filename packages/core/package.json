@@ -8,14 +8,18 @@
     "./*": "./src/*.ts"
   },
   "dependencies": {
-    "@helix/contracts": "workspace:*"
+    "@helix/contracts": "workspace:*",
+    "js-yaml": "4.3.0"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^24",
     "tsx": "^4.20.6",
     "typescript": "5.7.3"
   },
   "scripts": {
+    "strategy:history": "tsx src/strategy/history-cli.ts",
+    "strategy:backtest": "tsx src/strategy/backtest-cli.ts",
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

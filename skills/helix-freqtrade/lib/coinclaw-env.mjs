@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const LOCAL_DOCKER_COMPOSE = resolve(MODULE_DIR, '../../../docker/freqtrade/compose.yaml');
-const LOCAL_DOCKER_STRATEGIES = resolve(MODULE_DIR, '../../../strategies');
+const LOCAL_DOCKER_STRATEGIES = resolve(MODULE_DIR, '../assets');
 
 // 三引擎的真实 daemon 路径(--strategy-path / --userdir / --config 等都来自
 // image-*/freqtrade-launch.sh 或 image/freqtrade-wait.sh 的 exec 行).

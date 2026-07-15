@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.freqtrade.io/schema.json",
   "trading_mode": "futures",
+  "timeframe": "1m",
   "margin_mode": "isolated",
   "max_open_trades": 2,
   "stake_currency": "USDT",
@@ -61,5 +62,5 @@
   "internals": {
     "process_throttle_secs": 5
   },
-  "strategy": "HelixIntradayStrategy"
+  "strategy": "HelixSignalStrategy"
 }

@@ -2,8 +2,8 @@
 
 Helix is an AI trading terminal for crypto execution and strategy automation. Its runtime is split into:
 
-- `services/helixd`: resident backend and Agent Runtime
-- `app/dashboard`: presentation and interaction panel consuming helixd over HTTP, SSE, and WebSocket
+- `helixd`: resident backend and Agent Runtime
+- `dashboard`: presentation and interaction panel consuming helixd over HTTP, SSE, and WebSocket
 - `packages`: shared contracts and reusable backend capabilities
 - `skills`: account, execution, and Freqtrade automation tools for agents
 
@@ -37,7 +37,7 @@ Only these 3 skills are part of the skill layer:
 - Direct agent auto-entry is disabled. Unattended entries must come from a backtested Freqtrade strategy.
 - LIVE requires `HELIX_LIVE_TRADING_ENABLED=true`, a separate token of at least 24 characters, and a 10-minute Dashboard live session. A normal control session does not authorize live trading.
 - Emergency stop remains available without live authorization: it force-exits all trades at market before stopping the daemon. Reconciliation compares bot positions / active orders with the exchange in LIVE mode and returns `not_applicable` in dry-run.
-- `HelixIntradayStrategy` uses Brooks PA context, setup, expectation, and signal bars as its core. EMA, MACD, and RSI may only support or oppose a hypothesis; they cannot trigger a trade on their own.
+- Scalp/Swing decisions run only in the Helix Engine. `HelixSignalStrategy` consumes immutable Signal Artifacts pinned to exact strategy and Engine identities.
 - Never read or print `.env`, `.ft_api_pass`, API secrets, passphrases, private keys, or seed phrases.
 - Never use mock or random data as real trading or backtest input.
 
@@ -63,14 +63,7 @@ pnpm freqtrade:install
 
 Runtime credentials are stored in `~/.helix/.env`, and persistent Freqtrade data is stored in `~/.freqtrade/user_data`. The installer is idempotent and preserves existing configuration and API credentials.
 
-`HelixIntradayStrategy` enforces these defaults:
-
-- `0.5%` maximum risk per trade
-- `2%` daily loss lock until the next UTC day
-- `8%` 30-day portfolio drawdown protection
-- 6-hour pause after 3 consecutive losses
-- 2 concurrent positions and `1x` maximum leverage
-- reject entry when the latest 5m candle is older than 10 minutes
+`HelixSignalStrategy` contains no indicators or strategy decisions. Signal backtests require the original `helix.market-dataset/v1` and use only its matching base-timeframe OHLCV. Evidence binds the adapter fingerprint, Signal Artifact hash, strategy commit, configuration hash, Engine commit, market-data hash, Freqtrade version, runtime configuration, and result file. Dry-run requires `shadow` or later lifecycle; live requires `canary` or `production`.
 
 Dashboard control, deployment, backtest, authorization, emergency-stop, and reconciliation events persist in `~/.helix/helix.sqlite` with `0600` permissions.
 
@@ -154,14 +147,12 @@ FREQTRADE_URL="http://127.0.0.1:8888"
 
 ```text
 helix/
-├── app/
-│   └── dashboard/
+├── dashboard/
+├── helixd/
 ├── skills/
 │   ├── helix-account/
 │   ├── helix-trading/
 │   └── helix-freqtrade/
-├── strategies/
-│   └── HelixIntradayStrategy.py
 ├── AGENTS.md
 ├── CLAUDE.md
 ├── README.md

@@ -135,6 +135,29 @@ export type MacroSnapshot = {
   source: MacroDataSource
 }
 
+export type EconomicEventImpact = 'low' | 'medium' | 'high'
+
+export type EconomicCalendarEvent = {
+  id: string
+  title: string
+  titleZh?: string
+  currency: string
+  scheduledAt: number
+  impact: EconomicEventImpact
+  actual?: string
+  forecast?: string
+  previous?: string
+  source: string
+}
+
+export type EconomicCalendarSnapshot = {
+  ok: boolean
+  weekStart: number
+  weekEnd: number
+  events: EconomicCalendarEvent[]
+  source: MacroDataSource
+}
+
 export type MarketRangeLevel = {
   high: number
   low: number

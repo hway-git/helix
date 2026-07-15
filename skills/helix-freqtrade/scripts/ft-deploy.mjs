@@ -17,7 +17,7 @@ import {
   readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync,
   readdirSync, renameSync, chmodSync, openSync, closeSync,
 } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { basename, resolve, dirname } from 'node:path';
 import { execFileSync, execSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +30,17 @@ import {
   buildStrategyCode, SAMPLE_STRATEGY,
   AVAILABLE_INDICATORS,
 } from '../lib/strategy-builder.mjs';
+import {
+  HELIX_SIGNAL_STRATEGY,
+  loadSignalArtifact,
+  pinnedSignalIdentity,
+  samePinnedSignalIdentity,
+} from '../lib/signal-artifact.mjs';
+import {
+  freqtradeOhlcvFile,
+  loadMarketDataset,
+  marketTimeframeMilliseconds,
+} from '../lib/market-dataset.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -39,6 +50,8 @@ const DOCKER_ENV = COINCLAW_ENV ? null : dockerFreqtradeEnv();
 const ENV = COINCLAW_ENV || DOCKER_ENV;
 const IS_DOCKER = ENV?.engine === 'docker';
 const HOST = hostModeFreqtradePaths();
+const SIGNAL_ADAPTER_ASSET_DIR = resolve(__dir, '..', 'assets');
+const SIGNAL_ADAPTER_FILES = ['HelixSignalStrategy.py', 'helix_signal_artifact.py'];
 
 // 三引擎下 STRAT_DIR / USER_DATA / CONFIG_PATH 直接来自 daemon 启动参数,
 // 跟 dashboard / freqtrade /api/v1/show_config 保持完全一致 — 不会出现
@@ -49,8 +62,11 @@ const CONFIG_PATH = ENV ? ENV.configPath       : HOST.configPath;
 const ENV_FILE   = ENV ? ENV.envFile           : envFileCandidates()[0]; // host: ~/.helix/.env(规范位置, 与读路径最高优先级一致)
 const FT_API_PORT = 8888;
 const FT_API_URL = `http://127.0.0.1:${FT_API_PORT}`;
-const BACKTEST_EVIDENCE_VERSION = 1;
+const BACKTEST_EVIDENCE_VERSION = 2;
 const BACKTEST_EVIDENCE_FILE = resolve(USER_DATA, 'backtest_results', '.helix-evidence.json');
+const SIGNAL_ARTIFACT_DIR = resolve(USER_DATA, 'helix', 'signals');
+const ACTIVE_SIGNAL_ARTIFACT_FILE = resolve(SIGNAL_ARTIFACT_DIR, 'active.json');
+const SIGNAL_BACKTEST_DATA_DIR = resolve(USER_DATA, 'helix', 'backtest-data');
 
 // FT_BIN 解析顺序:
 //   1. coinclaw 容器: 'freqtrade' — image PATH 上已经有 (entrypoint
@@ -145,15 +161,39 @@ function readJsonFile(file) {
   try { return JSON.parse(readFileSync(file, 'utf-8')); } catch { return null; }
 }
 
+function fileHash(file) {
+  return existsSync(file)
+    ? `sha256:${createHash('sha256').update(readFileSync(file)).digest('hex')}`
+    : null;
+}
+
+function requireUnchangedFile(file, expectedHash, name) {
+  const actualHash = fileHash(file);
+  if (!expectedHash || actualHash !== expectedHash) {
+    throw new Error(`${name} changed during backtest. Run the backtest again with immutable inputs.`);
+  }
+}
+
 function strategyFingerprint(strategy) {
   const file = resolve(STRAT_DIR, `${strategy}.py`);
   if (!existsSync(file)) return null;
+  if (strategy === HELIX_SIGNAL_STRATEGY) {
+    const files = SIGNAL_ADAPTER_FILES.map((name) => resolve(STRAT_DIR, name));
+    if (files.some((candidate) => !existsSync(candidate))) return null;
+    const hash = createHash('sha256');
+    for (const candidate of files) {
+      hash.update(`${candidate.slice(STRAT_DIR.length)}\0`);
+      hash.update(readFileSync(candidate));
+      hash.update('\0');
+    }
+    return hash.digest('hex');
+  }
   return createHash('sha256').update(readFileSync(file)).digest('hex');
 }
 
 function readBacktestEvidence() {
   const payload = readJsonFile(BACKTEST_EVIDENCE_FILE);
-  return payload?.version === BACKTEST_EVIDENCE_VERSION && Array.isArray(payload.records)
+  return (payload?.version === 1 || payload?.version === BACKTEST_EVIDENCE_VERSION) && Array.isArray(payload.records)
     ? payload.records
     : [];
 }
@@ -164,17 +204,50 @@ function backtestMetaFiles(resultsDir) {
 }
 
 function findNewBacktestResult(resultsDir, beforeFiles, strategy) {
-  return backtestMetaFiles(resultsDir)
+  const metaFile = backtestMetaFiles(resultsDir)
     .filter((file) => !beforeFiles.has(file))
     .sort((a, b) => b.localeCompare(a))
     .find((file) => {
       const meta = readJsonFile(resolve(resultsDir, file));
       return meta && Object.prototype.hasOwnProperty.call(meta, strategy);
-    })
-    ?.replace('.meta.json', '') || null;
+    });
+  if (!metaFile) return null;
+  const baseFile = metaFile.slice(0, -'.meta.json'.length);
+  const resultFile = [`${baseFile}.json`, `${baseFile}.zip`]
+    .find((file) => existsSync(resolve(resultsDir, file)));
+  return resultFile ? { resultFile, resultMetaFile: metaFile } : null;
 }
 
-function recordBacktestEvidence({ strategy, strategyHash, timeframe, timerange, pairs, resultFile, metrics }) {
+function signalArtifactEvidence(artifact) {
+  if (!artifact) return null;
+  return {
+    artifactHash: artifact.artifactHash,
+    schemaVersion: artifact.schemaVersion,
+    strategyLifecycle: artifact.strategyLifecycle,
+    identity: pinnedSignalIdentity(artifact),
+    marketDataSnapshotId: artifact.identity.marketDataSnapshotId,
+    symbol: artifact.symbol,
+    baseTimeframe: artifact.baseTimeframe,
+    marketData: artifact.marketData,
+    signalCount: artifact.signals.length,
+  };
+}
+
+function recordBacktestEvidence({
+  strategy,
+  strategyHash,
+  timeframe,
+  timerange,
+  pairs,
+  resultFile,
+  resultMetaFile,
+  metrics,
+  signalArtifact = null,
+  marketDataset = null,
+  executionEnvironment = null,
+  resultHash = null,
+  resultMetaHash = null,
+}) {
   const resultsDir = dirname(BACKTEST_EVIDENCE_FILE);
   mkdirSync(resultsDir, { recursive: true });
   const record = {
@@ -185,7 +258,13 @@ function recordBacktestEvidence({ strategy, strategyHash, timeframe, timerange, 
     timerange: timerange || '',
     pairs,
     resultFile,
+    resultMetaFile,
     metrics,
+    signalArtifact: signalArtifactEvidence(signalArtifact),
+    marketDataset,
+    executionEnvironment,
+    resultHash,
+    resultMetaHash,
     createdAt: new Date().toISOString(),
   };
   const payload = {
@@ -199,17 +278,126 @@ function recordBacktestEvidence({ strategy, strategyHash, timeframe, timerange, 
   return record;
 }
 
-function requireCurrentBacktestEvidence(strategy) {
+function requireCurrentBacktestEvidence(strategy, signalArtifact = null) {
   const strategyHash = strategyFingerprint(strategy);
-  const evidence = strategyHash
-    ? readBacktestEvidence().find((record) => (
-      record.strategy === strategy && record.strategyHash === strategyHash
-    ))
-    : null;
+  const evidence = strategyHash ? readBacktestEvidence().find((record) => {
+    if (record.strategy !== strategy || record.strategyHash !== strategyHash) return false;
+    if (strategy !== HELIX_SIGNAL_STRATEGY) return true;
+    if (!signalArtifact || !record.signalArtifact?.identity) return false;
+    return record.signalArtifact.artifactHash === signalArtifact.artifactHash
+      && record.signalArtifact.marketDataSnapshotId === signalArtifact.identity.marketDataSnapshotId
+      && record.marketDataset?.datasetHash === signalArtifact.identity.marketDataSnapshotId
+      && samePinnedSignalIdentity(
+        { identity: record.signalArtifact.identity },
+        signalArtifact,
+      );
+  }) : null;
   if (!evidence) {
+    if (strategy === HELIX_SIGNAL_STRATEGY) {
+      throw new Error(`Current Helix adapter and exact signal artifact have not been backtested. Run backtest with signal_artifact before deploy.`);
+    }
     throw new Error(`Current code for strategy "${strategy}" has not been backtested. Run backtest before deploy.`);
   }
   return evidence;
+}
+
+function installSignalAdapter() {
+  ensureStrategyDir();
+  for (const name of SIGNAL_ADAPTER_FILES) {
+    const source = resolve(SIGNAL_ADAPTER_ASSET_DIR, name);
+    const destination = resolve(STRAT_DIR, name);
+    if (!existsSync(source)) throw new Error(`Helix signal adapter asset is missing: ${source}`);
+    if (source !== destination) copyFileSync(source, destination);
+    try { chmodSync(destination, 0o644); } catch {}
+  }
+}
+
+function archiveSignalArtifact(file) {
+  if (typeof file !== 'string' || !file.trim()) throw new Error('signal_artifact must be a JSON file path');
+  const source = resolve(file.trim());
+  const artifact = loadSignalArtifact(source);
+  mkdirSync(SIGNAL_ARTIFACT_DIR, { recursive: true });
+  const hashFile = resolve(SIGNAL_ARTIFACT_DIR, `${artifact.artifactHash.replace(':', '-')}.json`);
+  if (existsSync(hashFile)) {
+    const staged = loadSignalArtifact(hashFile);
+    if (staged.artifactHash !== artifact.artifactHash) throw new Error(`staged signal artifact is corrupt: ${hashFile}`);
+  } else {
+    const tempFile = `${hashFile}.tmp.${process.pid}`;
+    copyFileSync(source, tempFile);
+    chmodSync(tempFile, 0o600);
+    renameSync(tempFile, hashFile);
+  }
+  return { artifact, hashFile };
+}
+
+function stageSignalBacktestDataset(file, artifact) {
+  if (typeof file !== 'string' || !file.trim()) throw new Error('market_dataset must be a JSON file path');
+  const source = resolve(file.trim());
+  const dataset = loadMarketDataset(source);
+  if (dataset.datasetHash !== artifact.identity.marketDataSnapshotId) {
+    throw new Error('market_dataset hash does not match signal artifact marketDataSnapshotId');
+  }
+  if (dataset.source.symbol !== artifact.symbol) {
+    throw new Error(`market_dataset symbol ${dataset.source.symbol} does not match signal artifact ${artifact.symbol}`);
+  }
+  const rendered = freqtradeOhlcvFile(dataset, artifact.baseTimeframe);
+  const candles = dataset.timeframes[artifact.baseTimeframe];
+  const lastCandleCloseTime = candles.at(-1).time + marketTimeframeMilliseconds(artifact.baseTimeframe);
+  if (candles[0].time !== artifact.marketData.firstCandleOpenTime
+    || lastCandleCloseTime !== artifact.marketData.lastCandleCloseTime) {
+    throw new Error('market_dataset base timeframe window does not match signal artifact marketData');
+  }
+  const dataRoot = resolve(SIGNAL_BACKTEST_DATA_DIR, dataset.datasetHash.replace(':', '-'));
+  const destination = resolve(dataRoot, rendered.relativePath);
+  mkdirSync(dirname(destination), { recursive: true });
+  if (existsSync(destination)) {
+    if (fileHash(destination) !== rendered.dataHash) {
+      throw new Error(`staged market dataset is corrupt: ${destination}`);
+    }
+  } else {
+    const temporary = `${destination}.tmp.${process.pid}`;
+    writeFileSync(temporary, rendered.content);
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, destination);
+  }
+  return {
+    dataset,
+    dataRoot,
+    dataFile: destination,
+    evidence: {
+      datasetHash: dataset.datasetHash,
+      provider: dataset.source.provider,
+      market: dataset.source.market,
+      instrumentId: dataset.source.instrumentId,
+      symbol: dataset.source.symbol,
+      baseTimeframe: artifact.baseTimeframe,
+      dataHash: rendered.dataHash,
+      candleCount: candles.length,
+      firstCandleOpenTime: candles[0].time,
+      lastCandleCloseTime,
+    },
+  };
+}
+
+function activateSignalArtifact(file) {
+  const archived = archiveSignalArtifact(file);
+  const activeTemp = `${ACTIVE_SIGNAL_ARTIFACT_FILE}.tmp.${process.pid}`;
+  writeFileSync(activeTemp, `${JSON.stringify(archived.artifact, null, 2)}\n`);
+  chmodSync(activeTemp, 0o600);
+  renameSync(activeTemp, ACTIVE_SIGNAL_ARTIFACT_FILE);
+  return { ...archived, activeFile: ACTIVE_SIGNAL_ARTIFACT_FILE };
+}
+
+function requireSignalDeploymentLifecycle(artifact, dryRun) {
+  const allowed = dryRun
+    ? new Set(['shadow', 'canary', 'production'])
+    : new Set(['canary', 'production']);
+  if (!allowed.has(artifact.strategyLifecycle)) {
+    throw new Error(
+      `Signal artifact lifecycle ${artifact.strategyLifecycle} cannot be deployed to ${dryRun ? 'dry-run' : 'live'}; `
+      + `expected ${[...allowed].join(' or ')}.`,
+    );
+  }
 }
 
 function readBacktestZipJson(zipFile) {
@@ -219,7 +407,8 @@ function readBacktestZipJson(zipFile) {
       .split('\n')
       .map((entry) => entry.trim())
       .filter(Boolean);
-    const jsonEntry = entries.find((entry) => entry.endsWith('.json') && !entry.endsWith('.meta.json'));
+    const expectedEntry = `${basename(zipFile, '.zip')}.json`;
+    const jsonEntry = entries.find((entry) => basename(entry) === expectedEntry);
     if (!jsonEntry) return null;
 
     const content = runFile('unzip', ['-p', zipFile, jsonEntry], { maxBuffer: 50 * 1024 * 1024 });
@@ -229,11 +418,14 @@ function readBacktestZipJson(zipFile) {
   }
 }
 
-function readBacktestPayload(resultsDir, baseFile) {
-  const jsonFile = resolve(resultsDir, `${baseFile}.json`);
+function readBacktestPayload(resultsDir, file) {
+  if (file.endsWith('.json')) return readJsonFile(resolve(resultsDir, file));
+  if (file.endsWith('.zip')) return readBacktestZipJson(resolve(resultsDir, file));
+
+  const jsonFile = resolve(resultsDir, `${file}.json`);
   if (existsSync(jsonFile)) return readJsonFile(jsonFile);
 
-  const zipFile = resolve(resultsDir, `${baseFile}.zip`);
+  const zipFile = resolve(resultsDir, `${file}.zip`);
   if (existsSync(zipFile)) return readBacktestZipJson(zipFile);
 
   return null;
@@ -243,9 +435,7 @@ function firstStrategySummary(payload, strategy) {
   if (!payload || typeof payload !== 'object') return null;
   const strategyMap = payload.strategy && typeof payload.strategy === 'object' ? payload.strategy : payload;
   if (strategyMap[strategy] && typeof strategyMap[strategy] === 'object') return strategyMap[strategy];
-
-  const firstKey = Object.keys(strategyMap).find((key) => strategyMap[key] && typeof strategyMap[key] === 'object');
-  return firstKey ? strategyMap[firstKey] : null;
+  return null;
 }
 
 function backtestMetrics(summary) {
@@ -268,18 +458,57 @@ function backtestMetrics(summary) {
   };
 }
 
-function metricsForEvidence(evidence) {
-  if (evidence?.metrics && typeof evidence.metrics === 'object') return evidence.metrics;
-  if (!evidence?.resultFile) return {};
+function evidenceFilePath(resultsDir, file, name, validSuffixes) {
+  if (typeof file !== 'string' || !file || basename(file) !== file
+    || !validSuffixes.some((suffix) => file.endsWith(suffix))) {
+    throw new Error(`${name} is invalid`);
+  }
+  return resolve(resultsDir, file);
+}
+
+function verifyBacktestEvidenceResult(evidence) {
+  if (!evidence?.resultFile) {
+    throw new Error(`Backtest evidence "${evidence?.id || 'unknown'}" has no result file. Run backtest again before deploy.`);
+  }
+  if (!evidence.resultMetaFile) {
+    throw new Error(`Backtest evidence "${evidence.id}" has no result metadata file. Run backtest again before deploy.`);
+  }
   const resultsDir = dirname(BACKTEST_EVIDENCE_FILE);
-  return backtestMetrics(firstStrategySummary(
-    readBacktestPayload(resultsDir, evidence.resultFile),
-    evidence.strategy,
-  ));
+  const resultFile = evidenceFilePath(resultsDir, evidence.resultFile, 'resultFile', ['.json', '.zip']);
+  const resultBase = evidence.resultFile.replace(/\.(?:json|zip)$/, '');
+  const expectedMetaFile = `${resultBase}.meta.json`;
+  if (evidence.resultMetaFile !== expectedMetaFile) {
+    throw new Error(`Backtest evidence "${evidence.id}" result metadata does not match its result file.`);
+  }
+  const resultMetaFile = evidenceFilePath(resultsDir, evidence.resultMetaFile, 'resultMetaFile', ['.meta.json']);
+  const actualResultHash = fileHash(resultFile);
+  if (!actualResultHash) throw new Error(`Backtest evidence "${evidence.id}" result file is missing.`);
+  if (actualResultHash !== evidence.resultHash) {
+    throw new Error(`Backtest evidence "${evidence.id}" result hash mismatch.`);
+  }
+  const actualResultMetaHash = fileHash(resultMetaFile);
+  if (!actualResultMetaHash) throw new Error(`Backtest evidence "${evidence.id}" result metadata file is missing.`);
+  if (actualResultMetaHash !== evidence.resultMetaHash) {
+    throw new Error(`Backtest evidence "${evidence.id}" result metadata hash mismatch.`);
+  }
+  const meta = readJsonFile(resultMetaFile);
+  if (!meta || !Object.prototype.hasOwnProperty.call(meta, evidence.strategy)) {
+    throw new Error(`Backtest evidence "${evidence.id}" result metadata does not contain strategy "${evidence.strategy}".`);
+  }
+  const summary = firstStrategySummary(readBacktestPayload(resultsDir, evidence.resultFile), evidence.strategy);
+  if (!summary) {
+    throw new Error(`Backtest evidence "${evidence.id}" result payload does not contain strategy "${evidence.strategy}".`);
+  }
+  return {
+    metrics: backtestMetrics(summary),
+    resultHash: actualResultHash,
+    resultMetaHash: actualResultMetaHash,
+  };
 }
 
 function requireDeployableBacktestEvidence(evidence) {
-  const metrics = metricsForEvidence(evidence);
+  const verified = verifyBacktestEvidenceResult(evidence);
+  const metrics = verified.metrics;
   if (metrics.trades == null || metrics.profitPct == null) {
     throw new Error(`Backtest evidence "${evidence.id}" has no verifiable trade/profit metrics. Run backtest again before deploy.`);
   }
@@ -289,7 +518,7 @@ function requireDeployableBacktestEvidence(evidence) {
   if (metrics.profitPct <= 0) {
     throw new Error(`Backtest evidence "${evidence.id}" is not profitable (${(metrics.profitPct * 100).toFixed(2)}%). Deployment blocked.`);
   }
-  return { ...evidence, metrics };
+  return { ...evidence, ...verified, metrics };
 }
 
 function assertStrategyName(strategy) {
@@ -526,6 +755,7 @@ function ensureModernPython() {
 
 function generateHostConfig(exchangeInfo, apiPassword, params = {}) {
   const config = {
+    ...(params.timeframe ? { timeframe: params.timeframe } : {}),
     trading_mode: params.trading_mode || 'futures',
     margin_mode: params.margin_mode || 'isolated',
     max_open_trades: params.max_open_trades || 2,
@@ -672,33 +902,70 @@ const actions = {
   //   改 config.strategy + 重启 daemon. 不再 git clone, 不再 nohup.
   // host 模式: 沿用老路径 (clone + setup.sh + nohup).
   deploy: async (params = {}) => {
-    const strategy = params.strategy ? assertStrategyName(params.strategy) : null;
+    const signalArtifact = params.signal_artifact
+      ? loadSignalArtifact(resolve(String(params.signal_artifact)))
+      : null;
+    if (signalArtifact) installSignalAdapter();
+    const strategy = params.strategy
+      ? assertStrategyName(params.strategy)
+      : signalArtifact ? HELIX_SIGNAL_STRATEGY : null;
     if (!strategy) throw new Error('strategy 必填, 例: {"strategy":"MyStrat"}');
+    if (strategy === HELIX_SIGNAL_STRATEGY && !signalArtifact) {
+      throw new Error('HelixSignalStrategy deployment requires signal_artifact so its pinned identity can be verified.');
+    }
+    if (signalArtifact && strategy !== HELIX_SIGNAL_STRATEGY) {
+      throw new Error(`signal_artifact can only be deployed with ${HELIX_SIGNAL_STRATEGY}.`);
+    }
+    const deploymentPairs = params.pairs
+      ? (Array.isArray(params.pairs) ? params.pairs : [params.pairs])
+      : [];
+    if (signalArtifact && deploymentPairs.length && (
+      deploymentPairs.length !== 1 || deploymentPairs[0] !== signalArtifact.symbol
+    )) {
+      throw new Error(`Signal artifact deployment pair must be exactly ${signalArtifact.symbol}.`);
+    }
     const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
     if (!existsSync(stratFile)) {
       throw new Error(`策略文件不存在: ${stratFile}. 先用 create_strategy 创建策略并完成回测。`);
     }
-    const evidence = requireDeployableBacktestEvidence(requireCurrentBacktestEvidence(strategy));
+    const evidence = requireDeployableBacktestEvidence(requireCurrentBacktestEvidence(strategy, signalArtifact));
 
     if (ENV) {
       const cfg = readDaemonConfig();
-      const before = { strategy: cfg.strategy, dry_run: cfg.dry_run, pairs: cfg.exchange?.pair_whitelist };
+      const before = {
+        strategy: cfg.strategy,
+        dry_run: cfg.dry_run,
+        pairs: cfg.exchange?.pair_whitelist,
+        timeframe: cfg.timeframe,
+      };
       const targetDryRun = typeof params.dry_run === 'boolean' ? params.dry_run : cfg.dry_run;
       const maxOpenTrades = requireMaxOpenTrades(params.max_open_trades ?? cfg.max_open_trades ?? 2);
+      if (signalArtifact) requireSignalDeploymentLifecycle(signalArtifact, targetDryRun);
       if (targetDryRun === false) requireLiveAuthorization({ ...params, max_open_trades: maxOpenTrades }, cfg);
+      const stagedArtifact = signalArtifact ? activateSignalArtifact(String(params.signal_artifact)) : null;
       cfg.strategy = strategy;
       // 允许在 deploy 里同时改 dry_run / pairs / max_open_trades, 一次完成.
       cfg.dry_run = targetDryRun;
-      if (Array.isArray(params.pairs) && params.pairs.length) {
+      if (deploymentPairs.length) {
         if (!cfg.exchange) cfg.exchange = {};
-        cfg.exchange.pair_whitelist = params.pairs;
+        cfg.exchange.pair_whitelist = deploymentPairs;
+      } else if (signalArtifact) {
+        if (!cfg.exchange) cfg.exchange = {};
+        cfg.exchange.pair_whitelist = [signalArtifact.symbol];
       }
+      if (signalArtifact) cfg.timeframe = signalArtifact.baseTimeframe;
       cfg.max_open_trades = maxOpenTrades;
       writeDaemonConfig(cfg);
       const restart = restartDaemon();
       return {
         success: true, mode: runtimeMode(), engine: ENV.engine,
         strategy, before, restart, backtest_evidence: evidence.id,
+        signal_artifact: stagedArtifact ? {
+          hash: stagedArtifact.artifact.artifactHash,
+          identity: pinnedSignalIdentity(stagedArtifact.artifact),
+          lifecycle: stagedArtifact.artifact.strategyLifecycle,
+          active_file: stagedArtifact.activeFile,
+        } : null,
         config_path: CONFIG_PATH, strategy_file: stratFile,
         note: '策略生效需 daemon 重启完成 (10-30s); dashboard 会自动刷新到新策略名',
         warning: cfg.dry_run === false
@@ -707,14 +974,17 @@ const actions = {
       };
     }
     // host mode
+    const targetDryRun = params.dry_run !== false;
     const maxOpenTrades = requireMaxOpenTrades(params.max_open_trades ?? 2);
-    if (params.dry_run === false) {
+    if (signalArtifact) requireSignalDeploymentLifecycle(signalArtifact, targetDryRun);
+    if (!targetDryRun) {
       requireLiveAuthorization({ ...params, max_open_trades: maxOpenTrades }, {
         max_open_trades: maxOpenTrades,
         exchange: { name: params.exchange || detectExchange()?.name || '' },
       });
     }
     ensureHostFreqtradeInstalled();
+    const stagedArtifact = signalArtifact ? activateSignalArtifact(String(params.signal_artifact)) : null;
     let exchangeInfo = detectExchange();
     if (!exchangeInfo) {
       if (params.dry_run !== false) {
@@ -727,7 +997,15 @@ const actions = {
     }
     mkdirSync(STRAT_DIR, { recursive: true });
     const apiPassword = randomBytes(8).toString('hex');
-    const config = generateHostConfig(exchangeInfo, apiPassword, { ...params, max_open_trades: maxOpenTrades });
+    const config = generateHostConfig(exchangeInfo, apiPassword, {
+      ...params,
+      dry_run: targetDryRun,
+      max_open_trades: maxOpenTrades,
+      ...(signalArtifact ? {
+        timeframe: signalArtifact.baseTimeframe,
+        pairs: deploymentPairs.length ? deploymentPairs : [signalArtifact.symbol],
+      } : {}),
+    });
     writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
     try { chmodSync(CONFIG_PATH, 0o600); } catch {} // config.json 含明文交易所 key/secret, 收紧权限
     const samplePath = resolve(STRAT_DIR, 'SampleStrategy.py');
@@ -754,6 +1032,12 @@ const actions = {
     appendEnv('FREQTRADE_PASSWORD', apiPassword);
     return {
       success: true, mode: 'host', backtest_evidence: evidence.id,
+      signal_artifact: stagedArtifact ? {
+        hash: stagedArtifact.artifact.artifactHash,
+        identity: pinnedSignalIdentity(stagedArtifact.artifact),
+        lifecycle: stagedArtifact.artifact.strategyLifecycle,
+        active_file: stagedArtifact.activeFile,
+      } : null,
       exchange: exchangeInfo.name, strategy, dry_run: config.dry_run,
       pairs: config.exchange.pair_whitelist,
       api_url: FT_API_URL, api_auth: 'stored in .env (FREQTRADE_PASSWORD)',
@@ -891,40 +1175,100 @@ const actions = {
   // coinclaw 模式跑 backtest 不影响 daemon: backtesting 走自己的进程,
   // 跟 daemon 共用 user_data 但不共用 :8888.
   backtest: async (params = {}) => {
+    const signalArtifact = params.signal_artifact
+      ? loadSignalArtifact(resolve(String(params.signal_artifact)))
+      : null;
+    const strategy = assertStrategyName(params.strategy || (signalArtifact ? HELIX_SIGNAL_STRATEGY : 'SampleStrategy'));
+    if (strategy === HELIX_SIGNAL_STRATEGY && !signalArtifact) {
+      throw new Error('HelixSignalStrategy backtest requires signal_artifact.');
+    }
+    if (signalArtifact && strategy !== HELIX_SIGNAL_STRATEGY) {
+      throw new Error(`signal_artifact can only be backtested with ${HELIX_SIGNAL_STRATEGY}.`);
+    }
+    const timeframe = params.timeframe || signalArtifact?.baseTimeframe || '1h';
+    if (signalArtifact && timeframe !== signalArtifact.baseTimeframe) {
+      throw new Error(`Backtest timeframe ${timeframe} does not match signal artifact baseTimeframe ${signalArtifact.baseTimeframe}.`);
+    }
+    const requestedPairs = params.pairs
+      ? (Array.isArray(params.pairs) ? params.pairs : [params.pairs])
+      : [];
+    if (signalArtifact && requestedPairs.length && (
+      requestedPairs.length !== 1 || requestedPairs[0] !== signalArtifact.symbol
+    )) {
+      throw new Error(`Signal artifact backtest pair must be exactly ${signalArtifact.symbol}.`);
+    }
+    const pairList = signalArtifact ? [signalArtifact.symbol] : requestedPairs;
+    if (signalArtifact && params.timerange) {
+      throw new Error('Signal artifact backtest uses the exact market_dataset window and does not accept timerange.');
+    }
+    if (signalArtifact && !params.market_dataset) {
+      throw new Error('HelixSignalStrategy backtest requires market_dataset matching the signal artifact identity.');
+    }
+    if (!signalArtifact && params.market_dataset) {
+      throw new Error('market_dataset can only be used with a signal_artifact backtest.');
+    }
+    const stagedDataset = signalArtifact
+      ? stageSignalBacktestDataset(String(params.market_dataset), signalArtifact)
+      : null;
+    if (signalArtifact) installSignalAdapter();
+    const archivedArtifact = signalArtifact ? archiveSignalArtifact(String(params.signal_artifact)) : null;
     ensureHostFreqtradeInstalled();
     if (!existsSync(CONFIG_PATH)) {
       mkdirSync(dirname(CONFIG_PATH), { recursive: true });
-      const exchange = params.exchange || 'binance';
+      const exchange = stagedDataset?.dataset.source.provider || params.exchange || 'binance';
       const cfg = generateHostConfig(
         { name: exchange, key: 'backtest-only', secret: 'backtest-only' },
         randomBytes(8).toString('hex'),
-        { dry_run: true, pairs: params.pairs || ['BTC/USDT:USDT'] },
+        { dry_run: true, timeframe, pairs: pairList.length ? pairList : ['BTC/USDT:USDT'] },
       );
       writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
       console.error(`Auto-created backtest config (exchange: ${exchange})`);
     }
-    const strategy = assertStrategyName(params.strategy || 'SampleStrategy');
+    const backtestConfig = readJsonFile(CONFIG_PATH);
+    if (stagedDataset) {
+      const configuredExchange = String(backtestConfig?.exchange?.name || '').toLowerCase();
+      const datasetProvider = stagedDataset.dataset.source.provider.toLowerCase();
+      if (configuredExchange !== datasetProvider) {
+        throw new Error(`Freqtrade exchange ${configuredExchange || 'unknown'} does not match market_dataset provider ${datasetProvider}`);
+      }
+      if (backtestConfig?.trading_mode !== stagedDataset.dataset.source.market) {
+        throw new Error(`Freqtrade trading_mode ${backtestConfig?.trading_mode || 'unknown'} does not match market_dataset market ${stagedDataset.dataset.source.market}`);
+      }
+    }
     const stratFile = resolve(STRAT_DIR, `${strategy}.py`);
     if (!existsSync(stratFile)) {
       throw new Error(`Strategy "${strategy}" not found at ${stratFile}. Use create_strategy or list with strategy_list.`);
     }
-    const timeframe = params.timeframe || '1h';
-    const timerange = params.timerange || '';
-    const pairs = params.pairs;
-    const pairList = pairs ? (Array.isArray(pairs) ? pairs : [pairs]) : [];
+    const timerange = signalArtifact ? '' : params.timerange || '';
+    const fee = params.fee === undefined ? null : Number(params.fee);
+    if (fee !== null && (!Number.isFinite(fee) || fee < 0)) throw new Error('fee must be a non-negative number');
     const resultsDir = resolve(USER_DATA, 'backtest_results');
     const previousResultFiles = new Set(backtestMetaFiles(resultsDir));
     const strategyHash = strategyFingerprint(strategy);
     if (!strategyHash) throw new Error(`Unable to fingerprint strategy: ${stratFile}`);
+    const configHash = fileHash(CONFIG_PATH);
+    if (!configHash) throw new Error(`Unable to fingerprint Freqtrade config: ${CONFIG_PATH}`);
+    const stagedDataHash = stagedDataset ? fileHash(stagedDataset.dataFile) : null;
+    if (stagedDataset && stagedDataHash !== stagedDataset.evidence.dataHash) {
+      throw new Error(`Staged market dataset is corrupt: ${stagedDataset.dataFile}`);
+    }
+    const archivedArtifactFileHash = archivedArtifact ? fileHash(archivedArtifact.hashFile) : null;
+    if (archivedArtifact && !archivedArtifactFileHash) {
+      throw new Error(`Unable to fingerprint archived signal artifact: ${archivedArtifact.hashFile}`);
+    }
 
-    console.error('Downloading historical data...');
-    try {
-      const args = ['download-data', '--config', CONFIG_PATH, '--timeframe', timeframe, '--userdir', USER_DATA];
-      if (timerange) args.push('--timerange', timerange);
-      if (pairList.length) args.push('-p', ...pairList);
-      runFreqtrade(args, { timeout: 300000, env: proxyEnv() });
-    } catch (e) {
-      console.error(`Data download warning: ${e.message}`);
+    if (stagedDataset) {
+      console.error(`Using exact Helix market dataset ${stagedDataset.dataset.datasetHash}`);
+    } else {
+      console.error('Downloading historical data...');
+      try {
+        const args = ['download-data', '--config', CONFIG_PATH, '--timeframe', timeframe, '--userdir', USER_DATA];
+        if (timerange) args.push('--timerange', timerange);
+        if (pairList.length) args.push('-p', ...pairList);
+        runFreqtrade(args, { timeout: 300000, env: proxyEnv() });
+      } catch (e) {
+        console.error(`Data download warning: ${e.message}`);
+      }
     }
 
     console.error(`Running backtest: strategy=${strategy}, timeframe=${timeframe}${timerange ? `, timerange=${timerange}` : ''}...`);
@@ -938,15 +1282,41 @@ const actions = {
     ];
     if (timerange) backtestArgs.push('--timerange', timerange);
     if (pairList.length) backtestArgs.push('-p', ...pairList);
-    const rawOutput = runFreqtrade(backtestArgs, { timeout: 600000, env: proxyEnv() });
+    if (stagedDataset) {
+      backtestArgs.push('--datadir', stagedDataset.dataRoot, '--data-format-ohlcv', 'json', '--cache', 'none');
+    }
+    if (fee !== null) backtestArgs.push('--fee', String(fee));
+    const backtestEnv = archivedArtifact ? {
+      ...proxyEnv(),
+      HELIX_SIGNAL_ARTIFACT_PATH: dockerCliPath(archivedArtifact.hashFile),
+      HELIX_SIGNAL_TIMEFRAME: signalArtifact.baseTimeframe,
+    } : proxyEnv();
+    const rawOutput = runFreqtrade(backtestArgs, { timeout: 600000, env: backtestEnv });
+    const backtestResult = findNewBacktestResult(resultsDir, previousResultFiles, strategy);
+    if (!backtestResult) {
+      throw new Error(`Freqtrade did not create a verifiable result and metadata file for strategy "${strategy}".`);
+    }
+    const { resultFile, resultMetaFile } = backtestResult;
+    const resultPath = resolve(resultsDir, resultFile);
+    const resultMetaPath = resolve(resultsDir, resultMetaFile);
+    const resultHash = fileHash(resultPath);
+    const resultMetaHash = fileHash(resultMetaPath);
+    const summary = firstStrategySummary(readBacktestPayload(resultsDir, resultFile), strategy);
+    if (!resultHash || !resultMetaHash || !summary) {
+      throw new Error(`Freqtrade result for strategy "${strategy}" is incomplete or unreadable.`);
+    }
+    const metrics = backtestMetrics(summary);
+    const freqtradeVersion = runFreqtrade(['--version'], { timeout: 60000, env: proxyEnv() });
     if (strategyFingerprint(strategy) !== strategyHash) {
       throw new Error(`Strategy "${strategy}" changed during backtest. Run the backtest again for the current code.`);
     }
-    const resultFile = findNewBacktestResult(resultsDir, previousResultFiles, strategy);
-    const metrics = backtestMetrics(firstStrategySummary(
-      resultFile ? readBacktestPayload(resultsDir, resultFile) : null,
-      strategy,
-    ));
+    requireUnchangedFile(CONFIG_PATH, configHash, 'Freqtrade config');
+    if (stagedDataset) requireUnchangedFile(stagedDataset.dataFile, stagedDataHash, 'Staged market dataset');
+    if (archivedArtifact) {
+      requireUnchangedFile(archivedArtifact.hashFile, archivedArtifactFileHash, 'Archived signal artifact');
+    }
+    requireUnchangedFile(resultPath, resultHash, 'Freqtrade result');
+    requireUnchangedFile(resultMetaPath, resultMetaHash, 'Freqtrade result metadata');
     const evidence = recordBacktestEvidence({
       strategy,
       strategyHash,
@@ -954,7 +1324,19 @@ const actions = {
       timerange,
       pairs: pairList,
       resultFile,
+      resultMetaFile,
       metrics,
+      signalArtifact,
+      marketDataset: stagedDataset?.evidence || null,
+      executionEnvironment: {
+        freqtradeVersion,
+        configHash,
+        artifactFileHash: archivedArtifactFileHash,
+        fee,
+        dataFormatOhlcv: stagedDataset ? 'json' : null,
+      },
+      resultHash,
+      resultMetaHash,
     });
     const output = rawOutput
       .split('\n')
@@ -968,7 +1350,16 @@ const actions = {
       timeframe,
       timerange: timerange || 'all available',
       output,
-      evidence: { id: evidence.id, resultFile: evidence.resultFile, metrics, current: true },
+      evidence: {
+        id: evidence.id,
+        resultFile: evidence.resultFile,
+        resultHash: evidence.resultHash,
+        resultMetaFile: evidence.resultMetaFile,
+        resultMetaHash: evidence.resultMetaHash,
+        metrics,
+        current: true,
+        signalArtifact: evidence.signalArtifact,
+      },
     };
   },
 
@@ -1137,6 +1528,8 @@ const actions = {
       if (!currentHashes.has(record.strategy)) {
         currentHashes.set(record.strategy, strategyFingerprint(record.strategy));
       }
+      let verifiedResult = null;
+      try { verifiedResult = verifyBacktestEvidenceResult(record); } catch {}
       return {
         id: record.id,
         strategy: record.strategy,
@@ -1144,9 +1537,17 @@ const actions = {
         timerange: record.timerange,
         pairs: Array.isArray(record.pairs) ? record.pairs : [],
         resultFile: record.resultFile || null,
-        metrics: metricsForEvidence(record),
+        resultHash: record.resultHash || null,
+        resultMetaFile: record.resultMetaFile || null,
+        resultMetaHash: record.resultMetaHash || null,
+        metrics: verifiedResult?.metrics || {},
         createdAt: record.createdAt,
-        current: Boolean(record.strategyHash && currentHashes.get(record.strategy) === record.strategyHash),
+        signalArtifact: record.signalArtifact || null,
+        current: Boolean(
+          verifiedResult
+          && record.strategyHash
+          && currentHashes.get(record.strategy) === record.strategyHash
+        ),
         fingerprint: typeof record.strategyHash === 'string' ? record.strategyHash.slice(0, 12) : '',
       };
     });
