@@ -59,7 +59,12 @@ class HelixSignalStrategy(IStrategy):
         dataframe[signal_column] = 0
         if not signals or dataframe.empty:
             return
-        candle_open_ms = dataframe["date"].astype("int64") // 1_000_000
+        candle_open_ms = (
+            dataframe["date"]
+            .astype("datetime64[ns, UTC]")
+            .astype("int64")
+            // 1_000_000
+        )
         tags = candle_open_ms.map(signals)
         matched = tags.notna()
         dataframe.loc[matched, signal_column] = 1

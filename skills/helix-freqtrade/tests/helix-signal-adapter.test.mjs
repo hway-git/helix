@@ -12,6 +12,7 @@ import {
   verifySignalArtifact,
 } from '../lib/signal-artifact.mjs';
 import { marketDatasetHash } from '../lib/market-dataset.mjs';
+import { reconcileSignalBacktest } from '../lib/backtest-reconciliation.mjs';
 
 const execFileAsync = promisify(execFile);
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -108,12 +109,26 @@ async function adapterFingerprint() {
   return hash.digest('hex');
 }
 
-async function writeSignalBacktestFiles(resultsDir) {
+async function writeSignalBacktestFiles(resultsDir, { exitReason } = {}) {
+  const artifact = fixture();
   const resultFile = 'backtest-result-signal.json';
   const resultMetaFile = 'backtest-result-signal.meta.json';
   const resultContent = JSON.stringify({
     strategy: {
-      HelixSignalStrategy: { total_trades: 2, profit_total: 0.01, profit_total_abs: 10 },
+      HelixSignalStrategy: {
+        total_trades: 1,
+        profit_total: 0.01,
+        profit_total_abs: 10,
+        trades: [{
+          pair: artifact.symbol,
+          is_short: false,
+          is_open: false,
+          open_timestamp: artifact.signals[0].decisionTime,
+          close_timestamp: artifact.signals[1].decisionTime,
+          enter_tag: artifact.signals[0].signalId,
+          exit_reason: exitReason || artifact.signals[1].signalId,
+        }],
+      },
     },
   });
   const resultMetaContent = JSON.stringify({
@@ -285,11 +300,14 @@ import types
 
 
 class Series:
-    def __init__(self, values):
+    def __init__(self, values, unit=None):
         self.values = list(values)
+        self.unit = unit
         self.loc = SeriesLoc(self)
 
-    def astype(self, _dtype):
+    def astype(self, dtype):
+        if dtype == 'datetime64[ns, UTC]' and self.unit == 'ms':
+            return Series((value * 1_000_000 for value in self.values), 'ns')
         return self
 
     def __floordiv__(self, divisor):
@@ -332,7 +350,7 @@ class DataFrame:
         return not self.columns or not next(iter(self.columns.values()))
 
     def __getitem__(self, column):
-        return Series(self.columns[column])
+        return Series(self.columns[column], 'ms' if column == 'date' else None)
 
     def __setitem__(self, column, value):
         row_count = len(next(iter(self.columns.values())))
@@ -369,7 +387,7 @@ indexes = {
 }
 strategy = module.HelixSignalStrategy()
 strategy._signal_index = lambda _pair: indexes
-frame = DataFrame({'date': [first * 1_000_000]})
+frame = DataFrame({'date': [first]})
 strategy.populate_entry_trend(frame, {'pair': 'BTC/USDT:USDT'})
 strategy.populate_exit_trend(frame, {'pair': 'BTC/USDT:USDT'})
 print(json.dumps(frame.columns))
@@ -382,6 +400,58 @@ print(json.dumps(frame.columns))
   assert.deepEqual(columns.exit_long, [1]);
   assert.deepEqual(columns.exit_short, [0]);
   assert.deepEqual(columns.exit_tag, ['exit-long']);
+});
+
+test('Freqtrade result reconciles every artifact entry and exit by identity, time, pair, and side', () => {
+  const artifact = fixture();
+  const summary = {
+    total_trades: 1,
+    trades: [{
+      pair: artifact.symbol,
+      is_short: false,
+      is_open: false,
+      open_timestamp: artifact.signals[0].decisionTime,
+      close_timestamp: artifact.signals[1].decisionTime,
+      enter_tag: artifact.signals[0].signalId,
+      exit_reason: artifact.signals[1].signalId,
+    }],
+  };
+  assert.deepEqual(reconcileSignalBacktest(summary, artifact), {
+    trades: 1,
+    entries: 1,
+    exits: 1,
+    matchedSignals: 2,
+  });
+
+  const cases = [
+    ['declared count mismatch', { ...summary, total_trades: 2 }, /total_trades does not match trades array/],
+    ['missing trade', { total_trades: 0, trades: [] }, /trade count does not match signal artifact/],
+    ['open trade', { ...summary, trades: [{ ...summary.trades[0], is_open: true }] }, /is_open must be false/],
+    ['wrong pair', { ...summary, trades: [{ ...summary.trades[0], pair: 'ETH\/USDT:USDT' }] }, /pair does not match signal artifact symbol/],
+    ['wrong side', { ...summary, trades: [{ ...summary.trades[0], is_short: true }] }, /is_short does not match LONG/],
+    ['wrong entry time', { ...summary, trades: [{ ...summary.trades[0], open_timestamp: artifact.signals[0].sourceCandleOpenTime }] }, /open_timestamp does not match ENTER decisionTime/],
+    ['wrong exit time', { ...summary, trades: [{ ...summary.trades[0], close_timestamp: artifact.signals[1].sourceCandleOpenTime }] }, /close_timestamp does not match EXIT decisionTime/],
+    ['unknown entry', { ...summary, trades: [{ ...summary.trades[0], enter_tag: 'unknown-entry' }] }, /missing ENTER signal/],
+    ['non-artifact exit', { ...summary, trades: [{ ...summary.trades[0], exit_reason: 'force_exit' }] }, /exit_reason does not match EXIT signal/],
+  ];
+  for (const [name, candidate, message] of cases) {
+    assert.throws(() => reconcileSignalBacktest(candidate, artifact), message, name);
+  }
+
+  const shortArtifact = structuredClone(artifact);
+  shortArtifact.signals = shortArtifact.signals.map((signal) => ({ ...signal, side: 'SHORT' }));
+  const shortSummary = {
+    ...summary,
+    trades: [{ ...summary.trades[0], is_short: true }],
+  };
+  assert.equal(reconcileSignalBacktest(shortSummary, shortArtifact).matchedSignals, 2);
+
+  const openArtifact = structuredClone(artifact);
+  openArtifact.signals = [openArtifact.signals[0]];
+  assert.throws(
+    () => reconcileSignalBacktest({ total_trades: 0, trades: [] }, openArtifact),
+    /has no EXIT/,
+  );
 });
 
 test('backtest rejects timeframe and pair overrides that contradict the artifact', async (t) => {
@@ -466,7 +536,7 @@ test('deploy requires matching pinned backtest identity and a deployable lifecyc
       timerange: '20260701-20260702',
       pairs: ['BTC/USDT:USDT'],
       ...backtestFiles,
-      metrics: { trades: 2, profitPct: 0.01 },
+      metrics: { trades: 1, profitPct: 0.01 },
       signalArtifact: {
         artifactHash: source.artifactHash,
         marketDataSnapshotId: source.identity.marketDataSnapshotId,
@@ -511,6 +581,24 @@ test('deploy requires matching pinned backtest identity and a deployable lifecyc
     runDeployAction(home, 'deploy', { signal_artifact: artifactFile, dry_run: true }),
     (error) => {
       assert.match(error.stderr, /exact signal artifact have not been backtested/);
+      return true;
+    },
+  );
+
+  const { artifactHash: _proposalHash, ...proposalPayload } = artifact;
+  const shadowPayload = { ...proposalPayload, strategyLifecycle: 'shadow' };
+  const shadowArtifact = { ...shadowPayload, artifactHash: signalArtifactHash(shadowPayload) };
+  const forcedExitFiles = await writeSignalBacktestFiles(resultsDir, { exitReason: 'force_exit' });
+  const forcedExitEvidence = evidence(pinnedIdentity(shadowArtifact), shadowArtifact);
+  Object.assign(forcedExitEvidence.records[0], forcedExitFiles, {
+    strategyHash: await adapterFingerprint(),
+  });
+  await writeFile(artifactFile, JSON.stringify(shadowArtifact));
+  await writeFile(evidenceFile, JSON.stringify(forcedExitEvidence));
+  await assert.rejects(
+    runDeployAction(home, 'deploy', { signal_artifact: artifactFile, dry_run: true }),
+    (error) => {
+      assert.match(error.stderr, /exit_reason does not match EXIT signal/);
       return true;
     },
   );

@@ -41,6 +41,7 @@ import {
   loadMarketDataset,
   marketTimeframeMilliseconds,
 } from '../lib/market-dataset.mjs';
+import { reconcileSignalBacktest } from '../lib/backtest-reconciliation.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -247,6 +248,7 @@ function recordBacktestEvidence({
   executionEnvironment = null,
   resultHash = null,
   resultMetaHash = null,
+  reconciliation = null,
 }) {
   const resultsDir = dirname(BACKTEST_EVIDENCE_FILE);
   mkdirSync(resultsDir, { recursive: true });
@@ -265,6 +267,7 @@ function recordBacktestEvidence({
     executionEnvironment,
     resultHash,
     resultMetaHash,
+    reconciliation,
     createdAt: new Date().toISOString(),
   };
   const payload = {
@@ -466,7 +469,29 @@ function evidenceFilePath(resultsDir, file, name, validSuffixes) {
   return resolve(resultsDir, file);
 }
 
-function verifyBacktestEvidenceResult(evidence) {
+function evidenceSignalArtifact(evidence, signalArtifact = null) {
+  const expectedHash = evidence.signalArtifact?.artifactHash;
+  if (typeof expectedHash !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(expectedHash)) {
+    throw new Error(`Backtest evidence "${evidence.id}" has no valid signal artifact hash.`);
+  }
+  const artifact = signalArtifact || (() => {
+    const file = resolve(SIGNAL_ARTIFACT_DIR, `${expectedHash.replace(':', '-')}.json`);
+    if (!existsSync(file)) {
+      throw new Error(`Backtest evidence "${evidence.id}" archived signal artifact is missing.`);
+    }
+    return loadSignalArtifact(file);
+  })();
+  if (artifact.artifactHash !== expectedHash
+    || !evidence.signalArtifact?.identity
+    || !samePinnedSignalIdentity({ identity: evidence.signalArtifact.identity }, artifact)
+    || evidence.signalArtifact.marketDataSnapshotId !== artifact.identity.marketDataSnapshotId
+    || evidence.marketDataset?.datasetHash !== artifact.identity.marketDataSnapshotId) {
+    throw new Error(`Backtest evidence "${evidence.id}" does not match its signal artifact identity.`);
+  }
+  return artifact;
+}
+
+function verifyBacktestEvidenceResult(evidence, signalArtifact = null) {
   if (!evidence?.resultFile) {
     throw new Error(`Backtest evidence "${evidence?.id || 'unknown'}" has no result file. Run backtest again before deploy.`);
   }
@@ -499,15 +524,22 @@ function verifyBacktestEvidenceResult(evidence) {
   if (!summary) {
     throw new Error(`Backtest evidence "${evidence.id}" result payload does not contain strategy "${evidence.strategy}".`);
   }
+  const reconciliation = evidence.strategy === HELIX_SIGNAL_STRATEGY
+    ? reconcileSignalBacktest(summary, evidenceSignalArtifact(evidence, signalArtifact))
+    : null;
+  if (fileHash(resultFile) !== actualResultHash || fileHash(resultMetaFile) !== actualResultMetaHash) {
+    throw new Error(`Backtest evidence "${evidence.id}" result files changed during verification.`);
+  }
   return {
     metrics: backtestMetrics(summary),
     resultHash: actualResultHash,
     resultMetaHash: actualResultMetaHash,
+    reconciliation,
   };
 }
 
-function requireDeployableBacktestEvidence(evidence) {
-  const verified = verifyBacktestEvidenceResult(evidence);
+function requireDeployableBacktestEvidence(evidence, signalArtifact = null) {
+  const verified = verifyBacktestEvidenceResult(evidence, signalArtifact);
   const metrics = verified.metrics;
   if (metrics.trades == null || metrics.profitPct == null) {
     throw new Error(`Backtest evidence "${evidence.id}" has no verifiable trade/profit metrics. Run backtest again before deploy.`);
@@ -928,7 +960,10 @@ const actions = {
     if (!existsSync(stratFile)) {
       throw new Error(`策略文件不存在: ${stratFile}. 先用 create_strategy 创建策略并完成回测。`);
     }
-    const evidence = requireDeployableBacktestEvidence(requireCurrentBacktestEvidence(strategy, signalArtifact));
+    const evidence = requireDeployableBacktestEvidence(
+      requireCurrentBacktestEvidence(strategy, signalArtifact),
+      signalArtifact,
+    );
 
     if (ENV) {
       const cfg = readDaemonConfig();
@@ -1306,6 +1341,9 @@ const actions = {
       throw new Error(`Freqtrade result for strategy "${strategy}" is incomplete or unreadable.`);
     }
     const metrics = backtestMetrics(summary);
+    const reconciliation = signalArtifact
+      ? reconcileSignalBacktest(summary, signalArtifact)
+      : null;
     const freqtradeVersion = runFreqtrade(['--version'], { timeout: 60000, env: proxyEnv() });
     if (strategyFingerprint(strategy) !== strategyHash) {
       throw new Error(`Strategy "${strategy}" changed during backtest. Run the backtest again for the current code.`);
@@ -1337,6 +1375,7 @@ const actions = {
       },
       resultHash,
       resultMetaHash,
+      reconciliation,
     });
     const output = rawOutput
       .split('\n')
@@ -1357,6 +1396,7 @@ const actions = {
         resultMetaFile: evidence.resultMetaFile,
         resultMetaHash: evidence.resultMetaHash,
         metrics,
+        reconciliation,
         current: true,
         signalArtifact: evidence.signalArtifact,
       },
@@ -1543,6 +1583,7 @@ const actions = {
         metrics: verifiedResult?.metrics || {},
         createdAt: record.createdAt,
         signalArtifact: record.signalArtifact || null,
+        reconciliation: verifiedResult?.reconciliation || null,
         current: Boolean(
           verifiedResult
           && record.strategyHash
