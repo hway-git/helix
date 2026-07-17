@@ -621,7 +621,7 @@ async function writeReportArchives(directory, bundle, evidence) {
   };
 }
 
-test('builds a hash-pinned report but refuses to call absolute-only evidence promotable', async (t) => {
+test('builds a hash-pinned R-normalized research report but requires a versioned policy', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'helix-walk-forward-report-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await writeBundle(directory);
@@ -639,8 +639,10 @@ test('builds a hash-pinned report but refuses to call absolute-only evidence pro
   assert.equal(report.gate.ok, false);
   assert.equal(
     report.gate.checks.find(({ code }) => code === 'REQUIRED_METRICS_PRESENT').ok,
-    false,
+    true,
   );
+  assert.equal(report.aggregate.scenarios[0].riskNormalized.available, true);
+  assert.equal(report.aggregate.scenarios[0].riskNormalized.activeFolds, 1);
   assert.equal(
     report.gate.checks.find(({ code }) => code === 'VERSIONED_GATE_POLICY_PRESENT').ok,
     false,

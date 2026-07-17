@@ -1204,8 +1204,8 @@ function aggregateScenarios(plan, folds) {
       profitAbs,
       expectancyAbs: trades > 0 && profitAbs !== null ? profitAbs / trades : null,
     };
-    if (!plan.walkForwardPolicy) return result;
     const riskNormalized = scenarioRisk(evidence);
+    if (!plan.walkForwardPolicy) return { ...result, riskNormalized };
     return {
       ...result,
       riskNormalized,
@@ -1287,9 +1287,7 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
   }));
   const censored = folds.reduce((total, fold) => total + fold.censoredEntries.length, 0);
   const policy = bundle.plan.walkForwardPolicy;
-  const riskMetricsAvailable = policy
-    ? scenarios.every(({ riskNormalized }) => riskNormalized.available)
-    : folds.every((fold) => fold.executionEvidence.every(({ metrics }) => metrics.riskNormalized.available));
+  const riskMetricsAvailable = scenarios.every(({ riskNormalized }) => riskNormalized.available);
   const observedFeeScenarios = bundle.plan.executionScenarios.filter((scenario) => folds.some(
     (fold) => fold.executionEvidence.some((evidence) => (
       evidence.scenarioId === scenario.id && evidence.feeObservations.status === 'OBSERVED'
