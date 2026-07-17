@@ -31,8 +31,12 @@ function optionalText(value: unknown, name: string) {
 
 function optionalTimestamp(value: unknown, name: string) {
   if (value === undefined) return undefined
-  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${name} must be a non-negative integer timestamp`)
-  return Number(value)
+  if (Number.isSafeInteger(value) && Number(value) >= 0) return Number(value)
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value)
+    if (Number.isSafeInteger(parsed) && parsed >= 0) return parsed
+  }
+  throw new Error(`${name} must be a non-negative integer timestamp or ISO date`)
 }
 
 async function writeJsonAtomic(file: string, value: unknown) {
