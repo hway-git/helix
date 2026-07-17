@@ -71,6 +71,7 @@ type PendingScalpBreach = {
   side: 'LONG' | 'SHORT'
   breachedAt: number
   atr: number
+  invalidationPrice: number
   wickRatio: number
   maxOutsideCloseDistance: number
 }
@@ -79,9 +80,10 @@ type AcceptedScalpEvent = {
   detectorId: ScalpPriceEvent['detectorId']
   type: ScalpPriceEvent['type']
   decision: ScalpDetectorDecision
+  invalidationPrice: number
 }
 
-export const SCALP_HISTORICAL_CHECKPOINT_SCHEMA_VERSION = 'helix.scalp-evaluator-checkpoint/v1' as const
+export const SCALP_HISTORICAL_CHECKPOINT_SCHEMA_VERSION = 'helix.scalp-evaluator-checkpoint/v2' as const
 
 export type ScalpHistoricalEvaluatorCheckpoint = Readonly<{
   schemaVersion: typeof SCALP_HISTORICAL_CHECKPOINT_SCHEMA_VERSION
@@ -90,6 +92,7 @@ export type ScalpHistoricalEvaluatorCheckpoint = Readonly<{
   event: ScalpPriceEvent | null
   eventZone: ScalpHuntingZone | null
   eventRegime: StrategyHistoricalScalpRiskTraceEntry['scalp']['regime'] | null
+  eventInvalidationPrice: number | null
   position: OpenScalpPosition | null
   pendingBreach: PendingScalpBreach | null
   lastRegimeCandleTime: number
@@ -197,6 +200,7 @@ export class ScalpHistoricalEvaluator {
   private event?: ScalpPriceEvent
   private eventZone?: ScalpHuntingZone
   private eventRegime?: StrategyHistoricalScalpRiskTraceEntry['scalp']['regime']
+  private eventInvalidationPrice?: number
   private position?: OpenScalpPosition
   private pendingBreach?: PendingScalpBreach
   private lastRegimeCandleTime = -1
@@ -232,6 +236,7 @@ export class ScalpHistoricalEvaluator {
       event: this.event ?? null,
       eventZone: this.eventZone ?? null,
       eventRegime: this.eventRegime ?? null,
+      eventInvalidationPrice: this.eventInvalidationPrice ?? null,
       position: this.position ?? null,
       pendingBreach: this.pendingBreach ?? null,
       lastRegimeCandleTime: this.lastRegimeCandleTime,
@@ -276,14 +281,17 @@ export class ScalpHistoricalEvaluator {
     if (checkpoint.position && (!checkpoint.event || !checkpoint.eventZone || !checkpoint.eventRegime)) {
       throw new Error('Scalp evaluator checkpoint position is missing its frozen Event state')
     }
-    if (checkpoint.event && !checkpoint.eventRegime) {
-      throw new Error('Scalp evaluator checkpoint Event is missing its frozen Regime')
+    if (checkpoint.event && (!checkpoint.eventRegime || checkpoint.eventInvalidationPrice == null)) {
+      throw new Error('Scalp evaluator checkpoint Event is missing frozen context')
     }
     this.regime = structuredClone(checkpoint.regime ?? undefined)
     this.zones = structuredClone([...checkpoint.zones])
     this.event = structuredClone(checkpoint.event ?? undefined)
     this.eventZone = structuredClone(checkpoint.eventZone ?? undefined)
     this.eventRegime = structuredClone(checkpoint.eventRegime ?? undefined)
+    this.eventInvalidationPrice = checkpoint.eventInvalidationPrice == null
+      ? undefined
+      : checkpointNumber(checkpoint.eventInvalidationPrice, 'eventInvalidationPrice')
     this.position = structuredClone(checkpoint.position ?? undefined)
     this.pendingBreach = structuredClone(checkpoint.pendingBreach ?? undefined)
     this.lastRegimeCandleTime = checkpointInteger(checkpoint.lastRegimeCandleTime, 'lastRegimeCandleTime', -1)
@@ -370,6 +378,7 @@ export class ScalpHistoricalEvaluator {
       this.event = undefined
       this.eventZone = undefined
       this.eventRegime = undefined
+      this.eventInvalidationPrice = undefined
     }
 
     const entry = this.evaluateArmedEvent(context, oneMinute)
@@ -436,6 +445,7 @@ export class ScalpHistoricalEvaluator {
     this.event = undefined
     this.eventZone = undefined
     this.eventRegime = undefined
+    this.eventInvalidationPrice = undefined
     this.exitedTrades += 1
     return decision
   }
@@ -444,7 +454,8 @@ export class ScalpHistoricalEvaluator {
     context: HistoricalDecisionContext,
     oneMinute: readonly Candle[],
   ): HistoricalSignalDecision | null {
-    if (!this.event || this.event.state !== 'ARMED' || !this.eventZone || oneMinute.length < 15) return null
+    if (!this.event || this.event.state !== 'ARMED' || !this.eventZone
+      || this.eventInvalidationPrice === undefined || oneMinute.length < 15) return null
     const candle = latest(oneMinute)!
     const previous = oneMinute.at(-2)!
     const atr = latestAtr(oneMinute)
@@ -455,8 +466,8 @@ export class ScalpHistoricalEvaluator {
       && (side === 'LONG' ? candle.close > candle.open : candle.close < candle.open)
     const entryPrice = candle.close
     const stop = side === 'LONG'
-      ? this.eventZone.boundary.lower - atr * 0.1
-      : this.eventZone.boundary.upper + atr * 0.1
+      ? this.eventInvalidationPrice - atr * 0.1
+      : this.eventInvalidationPrice + atr * 0.1
     const riskDistance = side === 'LONG' ? entryPrice - stop : stop - entryPrice
     if (riskDistance <= 0) {
       this.recordEventRejection(this.event.id, ['RR_TOO_LOW'])
@@ -578,6 +589,7 @@ export class ScalpHistoricalEvaluator {
         side,
         breachedAt: candle.time,
         atr,
+        invalidationPrice: side === 'LONG' ? candle.low : candle.high,
         wickRatio: Math.max(0, wick),
         maxOutsideCloseDistance: 0,
       }
@@ -598,7 +610,10 @@ export class ScalpHistoricalEvaluator {
     })
     if (momentum.detected) {
       this.armEvent(context, zone, side, {
-        detectorId: 'momentum_burst_v1', type: 'MOMENTUM_BURST', decision: momentum,
+        detectorId: 'momentum_burst_v1',
+        type: 'MOMENTUM_BURST',
+        decision: momentum,
+        invalidationPrice: side === 'LONG' ? zone.boundary.lower : zone.boundary.upper,
       })
     }
   }
@@ -610,6 +625,9 @@ export class ScalpHistoricalEvaluator {
   } | null {
     const pending = this.pendingBreach
     if (!pending) return null
+    pending.invalidationPrice = pending.side === 'LONG'
+      ? Math.min(pending.invalidationPrice, candle.low)
+      : Math.max(pending.invalidationPrice, candle.high)
     const bars = Math.floor((candle.time - pending.breachedAt) / FIVE_MINUTES_MS) + 1
     const outsideCloseDistance = pending.side === 'LONG'
       ? Math.max(0, pending.zone.boundary.lower - candle.close)
@@ -645,7 +663,11 @@ export class ScalpHistoricalEvaluator {
       || bars >= Math.max(this.config.liquiditySweep.maxReclaimBars, this.config.breakoutFailure.maxReturnBars)) {
       this.pendingBreach = undefined
     }
-    return event ? { zone: pending.zone, side: pending.side, event } : null
+    return event ? {
+      zone: pending.zone,
+      side: pending.side,
+      event: { ...event, invalidationPrice: pending.invalidationPrice },
+    } : null
   }
 
   private armEvent(
@@ -673,9 +695,13 @@ export class ScalpHistoricalEvaluator {
       toState: 'ARMED',
       occurredAt: context.decisionTime,
       reasonCodes: [...accepted.decision.reasonCodes, 'EVENT_ARMED'],
-      featureSnapshot: accepted.decision.featureSnapshot,
+      featureSnapshot: {
+        ...accepted.decision.featureSnapshot,
+        invalidation_price: accepted.invalidationPrice,
+      },
     }).event
     this.eventZone = zone
+    this.eventInvalidationPrice = accepted.invalidationPrice
     this.eventRegime = {
       id: this.regime.regime.id,
       type: this.regime.regime.type,

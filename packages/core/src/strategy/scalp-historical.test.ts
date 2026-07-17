@@ -314,6 +314,7 @@ test('tracks a boundary breach across closed 5m bars and applies follow-through'
       regime?: ScalpMarketRegimeDecision
       zones: ScalpHuntingZone[]
       event?: ScalpPriceEvent
+      eventInvalidationPrice?: number
     }
     internal.regime = {
       regime: { id: 'regime-1', symbol: 'BTC/USDT:USDT', type: 'RANGING', score: 80, observedAt: 0 },
@@ -357,11 +358,23 @@ test('tracks a boundary breach across closed 5m bars and applies follow-through'
   assert.equal((accepted.internal.event as ScalpPriceEvent | undefined)?.type, 'LIQUIDITY_SWEEP')
   assert.equal((accepted.internal.event as ScalpPriceEvent | undefined)?.state, 'ARMED')
   assert.equal((accepted.internal.event as ScalpPriceEvent | undefined)?.score, 72)
+  assert.equal(accepted.internal.eventInvalidationPrice, breach.low)
 
   const rejected = setup(0.1)
   evaluate(rejected.evaluator, [...base, breach], breach.time + 5 * minute)
   evaluate(rejected.evaluator, [...base, breach, reclaim], reclaim.time + 5 * minute)
   assert.equal(rejected.internal.event, undefined)
+})
+
+test('rejects checkpoints from the pre-invalidation Scalp evaluator', () => {
+  const legacy = {
+    ...new ScalpHistoricalEvaluator(config).checkpoint(),
+    schemaVersion: 'helix.scalp-evaluator-checkpoint/v1',
+  }
+  assert.throws(
+    () => new ScalpHistoricalEvaluator(config, undefined, legacy as never),
+    /unsupported Scalp evaluator checkpoint/,
+  )
 })
 
 test('freezes the arm-time Regime in each successful ENTER risk entry', () => {
@@ -384,6 +397,7 @@ test('freezes the arm-time Regime in each successful ENTER risk entry', () => {
         detectorId: 'momentum_burst_v1'
         type: 'MOMENTUM_BURST'
         decision: { detected: boolean; reasonCodes: string[]; featureSnapshot: Record<string, never> }
+        invalidationPrice: number
       },
     ): void
   }
@@ -407,6 +421,7 @@ test('freezes the arm-time Regime in each successful ENTER risk entry', () => {
     detectorId: 'momentum_burst_v1',
     type: 'MOMENTUM_BURST',
     decision: { detected: true, reasonCodes: ['MOMENTUM_BURST_DETECTED'], featureSnapshot: {} },
+    invalidationPrice: source.boundary.lower,
   })
 
   internal.regime = {
@@ -437,6 +452,7 @@ test('freezes the arm-time Regime in each successful ENTER risk entry', () => {
   assert.equal(riskEntries.length, 1)
   assert.deepEqual(riskEntries[0]!.scalp.regime, { id: 'regime-at-arm', type: 'RANGING' })
   assert.deepEqual(riskEntries[0]!.entryPrice, { source: 'DECISION_CANDLE_CLOSE', price: 104 })
+  assert.ok(riskEntries[0]!.initialStop < source.boundary.lower)
 })
 
 test('rejects an armed Event when its stop is not beyond entry in the risk direction', () => {
@@ -459,6 +475,7 @@ test('rejects an armed Event when its stop is not beyond entry in the risk direc
         detectorId: 'momentum_burst_v1'
         type: 'MOMENTUM_BURST'
         decision: { detected: boolean; reasonCodes: string[]; featureSnapshot: Record<string, never> }
+        invalidationPrice: number
       },
     ): void
   }
@@ -482,6 +499,7 @@ test('rejects an armed Event when its stop is not beyond entry in the risk direc
     detectorId: 'momentum_burst_v1',
     type: 'MOMENTUM_BURST',
     decision: { detected: true, reasonCodes: ['MOMENTUM_BURST_DETECTED'], featureSnapshot: {} },
+    invalidationPrice: source.boundary.lower,
   })
 
   const oneMinute = Array.from({ length: 15 }, (_, index): Candle => ({

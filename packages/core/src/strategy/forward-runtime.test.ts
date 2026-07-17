@@ -46,7 +46,7 @@ function signalCandles(count: number): Candle[] {
   ))
   return closes.map((close, index) => {
     const open = index === 0 ? close : closes[index - 1]!
-    const sweep = index > 24 * 60 && index % 180 === 0 ? 8 : 0
+    const sweep = index > 24 * 60 && index % 180 === 0 ? 2 : 0
     return {
       time: index * minute,
       open,

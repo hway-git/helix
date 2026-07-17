@@ -51,7 +51,7 @@ export function createStrategyEvaluator(
       regime: '1h', hunting_zone: '15m', price_event: '5m', execution: '1m',
     })
     const config = scalpHistoricalConfig(manifest)
-    if (checkpoint && checkpoint.schemaVersion !== 'helix.scalp-evaluator-checkpoint/v1') {
+    if (checkpoint && checkpoint.schemaVersion !== 'helix.scalp-evaluator-checkpoint/v2') {
       throw new Error('Scalp strategy cannot restore a non-Scalp evaluator checkpoint')
     }
     const evaluator = new ScalpHistoricalEvaluator(config, recordHistoricalRiskEntry, checkpoint)
