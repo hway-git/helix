@@ -298,3 +298,72 @@ test('freezes the arm-time Regime in each successful ENTER risk entry', () => {
   assert.deepEqual(riskEntries[0]!.scalp.regime, { id: 'regime-at-arm', type: 'RANGING' })
   assert.deepEqual(riskEntries[0]!.entryPrice, { source: 'DECISION_CANDLE_CLOSE', price: 104 })
 })
+
+test('rejects an armed Event when its stop is not beyond entry in the risk direction', () => {
+  const riskEntries: StrategyHistoricalScalpRiskTraceEntry[] = []
+  const evaluator = new ScalpHistoricalEvaluator(config, (entry) => riskEntries.push(entry))
+  const source = zone({ boundary: { lower: 105, upper: 106 } })
+  const target = zone({
+    id: 'target-zone',
+    directionInterest: 'SHORT',
+    boundary: { lower: 110, upper: 111 },
+  })
+  const internal = evaluator as unknown as {
+    regime?: ScalpMarketRegimeDecision
+    zones: ScalpHuntingZone[]
+    armEvent(
+      context: HistoricalDecisionContext,
+      armedZone: ScalpHuntingZone,
+      side: 'LONG' | 'SHORT',
+      accepted: {
+        detectorId: 'momentum_burst_v1'
+        type: 'MOMENTUM_BURST'
+        decision: { detected: boolean; reasonCodes: string[]; featureSnapshot: Record<string, never> }
+      },
+    ): void
+  }
+  internal.regime = {
+    regime: { id: 'regime-at-arm', symbol: 'BTC/USDT:USDT', type: 'RANGING', score: 80, observedAt: 0 },
+    reasonCodes: ['REGIME_RANGING'],
+    featureSnapshot: {},
+  }
+  internal.zones = [source, target]
+  const armTime = 15 * minute
+  const armCandle: Candle = {
+    time: armTime - minute, open: 102, high: 102.2, low: 101.8, close: 102, volume: 100,
+  }
+  internal.armEvent({
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '1m',
+    decisionTime: armTime,
+    sourceCandle: armCandle,
+    candles: { '1m': [armCandle], '5m': [], '15m': [], '1h': [] },
+  }, source, 'LONG', {
+    detectorId: 'momentum_burst_v1',
+    type: 'MOMENTUM_BURST',
+    decision: { detected: true, reasonCodes: ['MOMENTUM_BURST_DETECTED'], featureSnapshot: {} },
+  })
+
+  const oneMinute = Array.from({ length: 15 }, (_, index): Candle => ({
+    time: (index + 1) * minute,
+    open: 102,
+    high: 102.2,
+    low: 101.8,
+    close: 102,
+    volume: 100,
+  }))
+  oneMinute[14] = {
+    time: armTime, open: 102, high: 104.2, low: 101.8, close: 104, volume: 100,
+  }
+  const decisions = evaluator.evaluate({
+    symbol: 'BTC/USDT:USDT',
+    baseTimeframe: '1m',
+    decisionTime: armTime + minute,
+    sourceCandle: oneMinute.at(-1)!,
+    candles: { '1m': oneMinute, '5m': [], '15m': [], '1h': [] },
+  })
+
+  assert.deepEqual(decisions, [])
+  assert.deepEqual(riskEntries, [])
+  assert.equal(evaluator.statistics().rejectedEventsByReason.RR_TOO_LOW, 1)
+})

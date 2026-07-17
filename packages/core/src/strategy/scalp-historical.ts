@@ -455,8 +455,11 @@ export class ScalpHistoricalEvaluator {
     const stop = side === 'LONG'
       ? this.eventZone.boundary.lower - atr * 0.1
       : this.eventZone.boundary.upper + atr * 0.1
-    const riskDistance = Math.abs(entryPrice - stop)
-    if (riskDistance <= 0) return null
+    const riskDistance = side === 'LONG' ? entryPrice - stop : stop - entryPrice
+    if (riskDistance <= 0) {
+      this.recordEventRejection(this.event.id, ['RR_TOO_LOW'])
+      return null
+    }
     const structuralTarget = selectScalpStructuralTarget({
       zones: this.zones,
       sourceZoneId: this.eventZone.id,
