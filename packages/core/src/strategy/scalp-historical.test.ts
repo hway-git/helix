@@ -11,6 +11,7 @@ import { createStrategyHistoricalDataset } from './historical-dataset'
 import { runHistoricalStrategy, type HistoricalDecisionContext } from './historical-runner'
 import {
   ScalpHistoricalEvaluator,
+  scalpMicroStructureBreak,
   selectScalpStructuralTarget,
   type ScalpHistoricalEvaluatorConfig,
 } from './scalp-historical'
@@ -22,12 +23,13 @@ function minuteCandles(count: number): Candle[] {
     100
       + Math.sin(index / 45) * 5
       + Math.sin(index / 6) * 0.35
+      + [0, 0.3, -0.2, 0.6, 0, -0.3, 0.2, -0.6][index % 8]!
       + (index > 24 * 60 && index % 180 === 5 ? 3 : 0)
       - (index > 24 * 60 && index % 180 === 6 ? 3 : 0)
   ))
   return closes.map((close, index) => {
     const open = index === 0 ? close : closes[index - 1]!
-    const sweep = index > 24 * 60 && index % 180 === 0 ? 8 : 0
+    const sweep = index > 24 * 60 && index % 180 === 0 ? 2 : 0
     return {
       time: index * minute,
       open,
@@ -303,6 +305,34 @@ test('selects the nearest eligible structural target without synthesizing minimu
   }), null)
 })
 
+test('requires a closed 1m pivot before declaring a micro structure break', () => {
+  const candle = (time: number, open: number, high: number, low: number, close: number): Candle => ({
+    time, open, high, low, close, volume: 100,
+  })
+  const long = [
+    candle(0, 100, 101, 99, 100),
+    candle(minute, 100, 103, 100, 102),
+    candle(2 * minute, 102, 102.5, 100.5, 101),
+    candle(3 * minute, 101, 104, 101, 103.5),
+  ]
+  const short = [
+    candle(0, 100, 101, 99, 100),
+    candle(minute, 100, 100, 97, 98),
+    candle(2 * minute, 98, 99.5, 97.5, 99),
+    candle(3 * minute, 99, 99, 96, 96.5),
+  ]
+  const monotonic = [
+    candle(0, 100, 101, 99, 100.5),
+    candle(minute, 100.5, 102, 100, 101.5),
+    candle(2 * minute, 101.5, 103, 101, 102.5),
+    candle(3 * minute, 102.5, 104, 102, 103.5),
+  ]
+
+  assert.equal(scalpMicroStructureBreak(long, 'LONG'), true)
+  assert.equal(scalpMicroStructureBreak(short, 'SHORT'), true)
+  assert.equal(scalpMicroStructureBreak(monotonic, 'LONG'), false)
+})
+
 test('tracks a boundary breach across closed 5m bars and applies follow-through', () => {
   const setup = (maxFollowThroughAtr: number) => {
     const evaluator = new ScalpHistoricalEvaluator({
@@ -437,6 +467,9 @@ test('freezes the arm-time Regime in each successful ENTER risk entry', () => {
     close: 102,
     volume: 100,
   }))
+  oneMinute[12] = {
+    time: 13 * minute, open: 102, high: 103, low: 101.8, close: 102.5, volume: 100,
+  }
   oneMinute[14] = {
     time: armTime, open: 102, high: 104.2, low: 101.8, close: 104, volume: 100,
   }

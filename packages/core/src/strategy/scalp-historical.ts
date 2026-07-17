@@ -136,6 +136,26 @@ function bodyRatio(candle: Candle) {
   return Math.abs(candle.close - candle.open) / Math.max(candle.high - candle.low, Number.EPSILON)
 }
 
+export function scalpMicroStructureBreak(
+  candles: readonly Candle[],
+  side: 'LONG' | 'SHORT',
+) {
+  const current = candles.at(-1)
+  if (!current || candles.length < 4) return false
+  for (let index = candles.length - 3; index >= 1; index -= 1) {
+    const pivot = candles[index]!
+    const previous = candles[index - 1]!
+    const next = candles[index + 1]!
+    if (side === 'LONG' && pivot.high > previous.high && pivot.high > next.high) {
+      return current.close > pivot.high
+    }
+    if (side === 'SHORT' && pivot.low < previous.low && pivot.low < next.low) {
+      return current.close < pivot.low
+    }
+  }
+  return false
+}
+
 function eventGrade(score: number): ScalpGrade | null {
   if (score >= 85) return 'A_PLUS'
   if (score >= 75) return 'A'
@@ -457,11 +477,10 @@ export class ScalpHistoricalEvaluator {
     if (!this.event || this.event.state !== 'ARMED' || !this.eventZone
       || this.eventInvalidationPrice === undefined || oneMinute.length < 15) return null
     const candle = latest(oneMinute)!
-    const previous = oneMinute.at(-2)!
     const atr = latestAtr(oneMinute)
     if (!atr || atr <= 0) return null
     const side = this.event.direction
-    const microStructureBreak = side === 'LONG' ? candle.close > previous.high : candle.close < previous.low
+    const microStructureBreak = scalpMicroStructureBreak(oneMinute.slice(-15), side)
     const displacement = bodyRatio(candle) >= 0.55
       && (side === 'LONG' ? candle.close > candle.open : candle.close < candle.open)
     const entryPrice = candle.close
