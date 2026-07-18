@@ -28,6 +28,7 @@ const FOUR_HOURS_MS = 4 * HOUR_MS
 const DAY_MS = 24 * HOUR_MS
 const THESIS_TTL_MS = 14 * DAY_MS
 const ENTRY_ELIGIBLE_SCORE = 55
+const EXECUTION_STAGES: readonly SwingExecutionStage[] = ['EARLY', 'STANDARD', 'CONFIRMED']
 
 export type SwingHistoricalEvaluatorConfig = {
   dailyContext: SwingDailyMarketContextConfig
@@ -54,7 +55,7 @@ type SwingStructureBreak = {
   occurredAt: number
 }
 
-export const SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION = 'helix.swing-evaluator-checkpoint/v2' as const
+export const SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION = 'helix.swing-evaluator-checkpoint/v3' as const
 
 export type SwingHistoricalEvaluatorCheckpoint = Readonly<{
   schemaVersion: typeof SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION
@@ -78,6 +79,11 @@ export type SwingHistoricalEvaluatorCheckpoint = Readonly<{
   expiredBeforeFirstEntry: number
   entriesByStage: Readonly<Record<SwingExecutionStage, number>>
   entryGateRejections: readonly Readonly<{ thesisId: string; reasonCodes: readonly string[] }>[]
+  entryGateRejectionsByStage: readonly Readonly<{
+    stage: SwingExecutionStage
+    thesisId: string
+    reasonCodes: readonly string[]
+  }>[]
 }>
 
 function checkpointInteger(value: unknown, name: string, minimum = 0) {
@@ -113,6 +119,12 @@ function rejectionCounts(rejections: Map<string, Set<string>>) {
     for (const reason of reasons) counts[reason] = (counts[reason] ?? 0) + 1
   }
   return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)))
+}
+
+function stageRejectionMap() {
+  return new Map<SwingExecutionStage, Map<string, Set<string>>>(
+    EXECUTION_STAGES.map((stage) => [stage, new Map<string, Set<string>>()]),
+  )
 }
 
 export function swingStageForEvidence(evidence: SwingStageEvidence): SwingExecutionStage {
@@ -175,6 +187,7 @@ export class SwingHistoricalEvaluator {
     CONFIRMED: 0,
   }
   private readonly entryGateRejections = new Map<string, Set<string>>()
+  private readonly entryGateRejectionsByStage = stageRejectionMap()
 
   constructor(
     private readonly config: SwingHistoricalEvaluatorConfig,
@@ -212,6 +225,15 @@ export class SwingHistoricalEvaluator {
       entryGateRejections: [...this.entryGateRejections.entries()]
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([thesisId, reasonCodes]) => ({ thesisId, reasonCodes: [...reasonCodes].sort() })),
+      entryGateRejectionsByStage: EXECUTION_STAGES.flatMap((stage) => (
+        [...this.entryGateRejectionsByStage.get(stage)!.entries()]
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([thesisId, reasonCodes]) => ({
+            stage,
+            thesisId,
+            reasonCodes: [...reasonCodes].sort(),
+          }))
+      )),
     })
   }
 
@@ -219,7 +241,9 @@ export class SwingHistoricalEvaluator {
     if (!checkpoint || checkpoint.schemaVersion !== SWING_HISTORICAL_CHECKPOINT_SCHEMA_VERSION) {
       throw new Error('unsupported Swing evaluator checkpoint')
     }
-    if (!Array.isArray(checkpoint.locations) || !Array.isArray(checkpoint.entryGateRejections)) {
+    if (!Array.isArray(checkpoint.locations)
+      || !Array.isArray(checkpoint.entryGateRejections)
+      || !Array.isArray(checkpoint.entryGateRejectionsByStage)) {
       throw new Error('Swing evaluator checkpoint arrays are invalid')
     }
     const entriesByStage = checkpoint.entriesByStage
@@ -236,6 +260,20 @@ export class SwingHistoricalEvaluator {
       }
       if (rejections.has(entry.thesisId)) throw new Error('Swing evaluator checkpoint has duplicate rejection entries')
       rejections.set(entry.thesisId, new Set(entry.reasonCodes))
+    }
+    const rejectionsByStage = stageRejectionMap()
+    for (const entry of checkpoint.entryGateRejectionsByStage) {
+      if (!entry || !EXECUTION_STAGES.includes(entry.stage)
+        || typeof entry.thesisId !== 'string' || !entry.thesisId.trim()
+        || !Array.isArray(entry.reasonCodes)
+        || entry.reasonCodes.some((reason: string) => typeof reason !== 'string' || !reason.trim())) {
+        throw new Error('Swing evaluator checkpoint stage rejection entry is invalid')
+      }
+      const stageEntries = rejectionsByStage.get(entry.stage)!
+      if (stageEntries.has(entry.thesisId)) {
+        throw new Error('Swing evaluator checkpoint has duplicate stage rejection entries')
+      }
+      stageEntries.set(entry.thesisId, new Set(entry.reasonCodes))
     }
     if (checkpoint.position && (!checkpoint.thesis || !checkpoint.thesisLocation || !checkpoint.thesisContext)) {
       throw new Error('Swing evaluator checkpoint position is missing its frozen Thesis state')
@@ -281,6 +319,13 @@ export class SwingHistoricalEvaluator {
     }
     this.entryGateRejections.clear()
     for (const [thesisId, reasons] of rejections) this.entryGateRejections.set(thesisId, reasons)
+    for (const stage of EXECUTION_STAGES) {
+      const destination = this.entryGateRejectionsByStage.get(stage)!
+      destination.clear()
+      for (const [thesisId, reasons] of rejectionsByStage.get(stage)!) {
+        destination.set(thesisId, reasons)
+      }
+    }
   }
 
   statistics() {
@@ -293,6 +338,12 @@ export class SwingHistoricalEvaluator {
       expiredBeforeFirstEntry: this.expiredBeforeFirstEntry,
       entriesByStage: { ...this.entriesByStage },
       entryGateRejectionsByReason: rejectionCounts(this.entryGateRejections),
+      entryGateRejectionsByStageAndReason: Object.fromEntries(
+        EXECUTION_STAGES.map((stage) => [
+          stage,
+          rejectionCounts(this.entryGateRejectionsByStage.get(stage)!),
+        ]),
+      ) as Record<SwingExecutionStage, Record<string, number>>,
     }
   }
 
@@ -520,7 +571,7 @@ export class SwingHistoricalEvaluator {
       evidence,
     })
     if (!execution.triggered) {
-      this.recordEntryGateRejection(this.thesis.id, execution.reasonCodes)
+      this.recordEntryGateRejection(this.thesis.id, execution.reasonCodes, stage)
       return null
     }
     const risk = evaluateSwingRiskPolicy(this.config.risk, {
@@ -530,7 +581,7 @@ export class SwingHistoricalEvaluator {
       priceRiskRatio: riskDistance / entryPrice,
     })
     if (!risk.allowed) {
-      this.recordEntryGateRejection(this.thesis.id, risk.reasonCodes)
+      this.recordEntryGateRejection(this.thesis.id, risk.reasonCodes, stage)
       return null
     }
     const triggered = transitionSwingTradeThesis(this.thesis, {
@@ -655,9 +706,19 @@ export class SwingHistoricalEvaluator {
     }
   }
 
-  private recordEntryGateRejection(thesisId: string, reasons: readonly string[]) {
+  private recordEntryGateRejection(
+    thesisId: string,
+    reasons: readonly string[],
+    stage?: SwingExecutionStage,
+  ) {
     const recorded = this.entryGateRejections.get(thesisId) ?? new Set<string>()
     for (const reason of reasons) recorded.add(reason)
     this.entryGateRejections.set(thesisId, recorded)
+    if (stage) {
+      const stageEntries = this.entryGateRejectionsByStage.get(stage)!
+      const staged = stageEntries.get(thesisId) ?? new Set<string>()
+      for (const reason of reasons) staged.add(reason)
+      stageEntries.set(thesisId, staged)
+    }
   }
 }

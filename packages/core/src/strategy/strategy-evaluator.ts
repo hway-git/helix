@@ -84,7 +84,7 @@ export function createStrategyEvaluator(
       context: '1d', thesis: '4h', evidence: '1h', execution: '15m',
     })
     const config = swingHistoricalConfig(manifest)
-    if (checkpoint && checkpoint.schemaVersion !== 'helix.swing-evaluator-checkpoint/v2') {
+    if (checkpoint && checkpoint.schemaVersion !== 'helix.swing-evaluator-checkpoint/v3') {
       throw new Error('Swing strategy cannot restore a non-Swing evaluator checkpoint')
     }
     const evaluator = new SwingHistoricalEvaluator(config, recordHistoricalRiskEntry, checkpoint)

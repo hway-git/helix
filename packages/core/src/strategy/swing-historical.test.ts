@@ -525,6 +525,9 @@ test('deduplicates evaluated entry gate reasons by Thesis and counts pre-entry e
   evaluator.evaluate(decision(15 * fifteenMinutes))
   evaluator.evaluate(decision(16 * fifteenMinutes))
   assert.equal(evaluator.statistics().entryGateRejectionsByReason.RR_TOO_LOW, 1)
+  assert.equal(evaluator.statistics().entryGateRejectionsByStageAndReason.EARLY.RR_TOO_LOW, 1)
+  assert.deepEqual(evaluator.statistics().entryGateRejectionsByStageAndReason.STANDARD, {})
+  assert.deepEqual(evaluator.statistics().entryGateRejectionsByStageAndReason.CONFIRMED, {})
 
   const expiringEvaluator = new SwingHistoricalEvaluator(config)
   const expiringCandidate = createSwingTradeThesis({
