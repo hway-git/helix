@@ -155,6 +155,7 @@ export function swingHistoricalConfig(manifest: StrategyManifestIdentity): Swing
         CONFIRMED: number(rr.CONFIRMED, 'min_rr_by_stage.CONFIRMED'),
       },
       maxAttemptsPerThesis: number(execution.max_attempts_per_thesis, 'staged_execution_v1.max_attempts_per_thesis'),
+      stopBufferAtr: number(execution.stop_buffer_atr, 'staged_execution_v1.stop_buffer_atr'),
     },
     risk: {
       thesisRiskBudgetR: number(risk.thesis_risk_budget_r, 'swing_risk_budget_v1.thesis_risk_budget_r'),

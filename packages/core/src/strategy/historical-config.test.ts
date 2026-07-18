@@ -211,6 +211,7 @@ const swingCapabilities = {
   staged_execution_v1: {
     min_rr_by_stage: { EARLY: 1.5, STANDARD: 1.8, CONFIRMED: 2 },
     max_attempts_per_thesis: 3,
+    stop_buffer_atr: 0.1,
   },
   swing_risk_budget_v1: {
     thesis_risk_budget_r: 1,
@@ -250,6 +251,7 @@ test('maps every Swing manifest parameter into the evaluator configuration', () 
     execution: {
       minRrByStage: { EARLY: 1.5, STANDARD: 1.8, CONFIRMED: 2 },
       maxAttemptsPerThesis: 3,
+      stopBufferAtr: 0.1,
     },
     risk: {
       thesisRiskBudgetR: 1,

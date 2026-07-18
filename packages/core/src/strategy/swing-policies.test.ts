@@ -145,6 +145,7 @@ test('Swing staged execution applies Evidence, attempt, timing, and RR gates', (
   const config = {
     minRrByStage: { EARLY: 1.5, STANDARD: 1.8, CONFIRMED: 2 },
     maxAttemptsPerThesis: 3,
+    stopBufferAtr: 0.1,
   }
   const evidence = {
     locationAligned: true,

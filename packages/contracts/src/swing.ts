@@ -207,6 +207,7 @@ export type SwingInvalidationDecision = {
 export type SwingExecutionPolicyConfig = {
   minRrByStage: Record<SwingExecutionStage, number>
   maxAttemptsPerThesis: number
+  stopBufferAtr: number
 }
 
 export type SwingStageEvidence = {

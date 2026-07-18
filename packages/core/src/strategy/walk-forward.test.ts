@@ -57,6 +57,7 @@ function snapshot(): StrategyRepositorySnapshot {
     staged_execution_v1: {
       min_rr_by_stage: { EARLY: 1, STANDARD: 1, CONFIRMED: 1 },
       max_attempts_per_thesis: 2,
+      stop_buffer_atr: 0.1,
     },
     swing_risk_budget_v1: {
       thesis_risk_budget_r: 1,

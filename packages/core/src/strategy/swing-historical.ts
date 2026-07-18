@@ -181,6 +181,9 @@ export class SwingHistoricalEvaluator {
     private readonly recordHistoricalRiskEntry?: (entry: StrategyHistoricalSwingRiskTraceEntry) => void,
     checkpoint?: SwingHistoricalEvaluatorCheckpoint,
   ) {
+    if (!Number.isFinite(config.execution.stopBufferAtr) || config.execution.stopBufferAtr <= 0) {
+      throw new Error('config.execution.stopBufferAtr must be positive')
+    }
     if (checkpoint) this.restore(checkpoint)
   }
 
@@ -501,8 +504,8 @@ export class SwingHistoricalEvaluator {
     const stage = swingStageForEvidence(evidence)
     const entryPrice = candle.close
     const stop = side === 'LONG'
-      ? Math.min(location.boundaries.lower, candle.low) - atr * 0.1
-      : Math.max(location.boundaries.upper, candle.high) + atr * 0.1
+      ? Math.min(location.boundaries.lower, candle.low) - atr * this.config.execution.stopBufferAtr
+      : Math.max(location.boundaries.upper, candle.high) + atr * this.config.execution.stopBufferAtr
     const riskDistance = Math.abs(entryPrice - stop)
     if (riskDistance <= 0) return null
     const target = this.thesis.expectedMove.target

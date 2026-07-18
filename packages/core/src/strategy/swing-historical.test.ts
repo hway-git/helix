@@ -68,9 +68,23 @@ const config: SwingHistoricalEvaluatorConfig = {
     reactionDistanceAtr: 0.3, reactionBars: 4, meanReversionDistanceAtr: 1.5,
     maxTestCount: 20, maxAgeBars: 90, minLocationScore: 40,
   },
-  execution: { minRrByStage: { EARLY: 1, STANDARD: 1.2, CONFIRMED: 1.5 }, maxAttemptsPerThesis: 3 },
+  execution: {
+    minRrByStage: { EARLY: 1, STANDARD: 1.2, CONFIRMED: 1.5 },
+    maxAttemptsPerThesis: 3,
+    stopBufferAtr: 0.1,
+  },
   risk: { thesisRiskBudgetR: 1, maximumLeverage: 50, riskUnitRatio: 0.01, riskByStageR: { EARLY: 0.25, STANDARD: 0.35, CONFIRMED: 0.4 } },
 }
+
+test('requires a positive configured Swing Stop buffer', () => {
+  assert.throws(
+    () => new SwingHistoricalEvaluator({
+      ...config,
+      execution: { ...config.execution, stopBufferAtr: 0 },
+    }),
+    /config.execution.stopBufferAtr must be positive/,
+  )
+})
 
 test('produces deterministic Swing trades and permits repeated entries only under one Thesis budget', () => {
   const fifteen = baseCandles(70 * 24 * 4)
@@ -287,6 +301,7 @@ test('requires a later held retest before classifying an Entry as CONFIRMED', ()
     execution: {
       minRrByStage: { EARLY: 1, STANDARD: 100, CONFIRMED: 1 },
       maxAttemptsPerThesis: 3,
+      stopBufferAtr: 0.1,
     },
   }, (entry) => riskEntries.push(entry))
   const source = location({ direction: 'LONG', boundaries: { lower: 100, upper: 101 } })
