@@ -53,7 +53,7 @@ async function startWatchdog(home, {
 } = {}) {
   const root = join(home, 'forward');
   const reportFile = join(home, 'walk-forward-report.json');
-  const reportPayload = { schemaVersion: 'helix.walk-forward-report/v1', test: true };
+  const reportPayload = { schemaVersion: 'helix.walk-forward-report/v2', test: true };
   const reportHash = walkForwardReportHash(reportPayload);
   const deployment = createForwardDeployment(artifact(), {
     activatedAt: 1,

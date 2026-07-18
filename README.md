@@ -87,7 +87,7 @@ pnpm freqtrade:install
 
 运行配置和凭据保存在 `~/.helix/.env`，Freqtrade 用户数据保存在 `~/.freqtrade/user_data`。安装器可重复执行，不会覆盖已有配置或轮换已有 API 密码。
 
-`HelixSignalStrategy` 不包含指标或策略判断。Signal 回测必须同时提供原始 `helix.market-dataset/v1`，且只使用其中与 artifact 匹配的基础周期 OHLCV。风险仓位使用 `1R = 账户权益 1%`，杠杆只用于把该风险预算放入可用保证金范围，实际杠杆和 stake 会逐笔重建并写入证据。Walk-forward 使用策略 policy 固定的参考账户权益，不能继承开发机任意的 `dry_run_wallet`；回测证据会绑定 adapter 指纹、Signal Artifact hash、策略 commit、配置 hash、Engine commit、市场数据 hash、Freqtrade 版本、运行配置和结果文件；dry-run 只接受 `shadow` 及以上 lifecycle，live 只接受 `canary` 或 `production`。
+`HelixSignalStrategy` 不包含指标或策略判断。Signal 回测必须同时提供原始 `helix.market-dataset/v1`，且只使用其中与 artifact 匹配的基础周期 OHLCV。风险仓位使用 `1R = 账户权益 1%`；单笔预算为 `账户权益 × 0.01 × riskR`，但 realized R、MFE 和 MAE 始终除以账户级的 `账户权益 × 0.01`，不能把单笔预算误称为 1R。杠杆只用于把单笔风险预算放入可用保证金范围，实际杠杆和 stake 会逐笔重建并写入证据。Walk-forward 使用策略 policy 固定的参考账户权益，不能继承开发机任意的 `dry_run_wallet`；回测证据会绑定 adapter 指纹、Signal Artifact hash、策略 commit、配置 hash、Engine commit、市场数据 hash、Freqtrade 版本、运行配置和结果文件；dry-run 只接受 `shadow` 及以上 lifecycle，live 只接受 `canary` 或 `production`。
 
 当策略 manifest 已引用版本化 walk-forward policy 时，使用 Core 的 `run-policy` 从 policy 自动生成 fold、observation tail 和 fee 场景。Promotable report 会从归档成交与 initial-risk trace 重建逐笔 R、跨 fold 回撤及策略原生 segment 稳定性；Helix Signal 部署必须通过 `walk_forward_report` 提供与 Artifact 候选身份完全一致的通过报告，并将 report hash 固定进 forward deployment。
 

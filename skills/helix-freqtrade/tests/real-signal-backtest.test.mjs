@@ -327,11 +327,14 @@ dockerTest('real Freqtrade executes a fee-stressed walk-forward bundle with exac
   assert.equal(typeof metrics.expectancyAbs, 'number');
   assert.equal(typeof metrics.holdingSeconds, 'number');
   assert.equal(metrics.riskNormalized.available, true);
-  assert.equal(metrics.riskNormalized.reason, 'NET_FREQTRADE_EXECUTION');
+  assert.equal(metrics.riskNormalized.reason, 'NET_ACCOUNT_R_EXECUTION');
   assert.equal(typeof metrics.riskNormalized.expectancyR, 'number');
   assert.equal(typeof metrics.riskNormalized.maxDrawdownR, 'number');
-  assert.ok(Math.abs(metrics.riskNormalized.mfeR - (4 / 3)) < 1e-12);
-  assert.ok(Math.abs(metrics.riskNormalized.maeR - (1 / 3)) < 1e-12);
+  const [observation] = metrics.riskNormalized.observations;
+  const actualAccountRiskR = observation.actualRiskBudget
+    / (observation.accountEquity * observation.riskUnitRatio);
+  assert.ok(Math.abs(metrics.riskNormalized.mfeR - actualAccountRiskR * (4 / 3)) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.maeR - actualAccountRiskR * (1 / 3)) < 1e-12);
 
   const evidence = JSON.parse(await readFile(
     join(home, '.freqtrade', 'user_data', 'backtest_results', '.helix-evidence.json'),

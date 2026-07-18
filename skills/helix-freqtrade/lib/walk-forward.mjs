@@ -16,7 +16,7 @@ import { verifySignalArtifact } from './signal-artifact.mjs';
 
 export const WALK_FORWARD_PLAN_SCHEMA_VERSION = 'helix.walk-forward-plan/v1';
 export const WALK_FORWARD_RUN_SCHEMA_VERSION = 'helix.walk-forward-run/v1';
-export const WALK_FORWARD_REPORT_SCHEMA_VERSION = 'helix.walk-forward-report/v1';
+export const WALK_FORWARD_REPORT_SCHEMA_VERSION = 'helix.walk-forward-report/v2';
 
 const HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const COMMIT_PATTERN = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
@@ -1160,7 +1160,7 @@ function scenarioRisk(foldEvidence) {
   ));
   return {
     available: true,
-    reason: 'NET_FREQTRADE_EXECUTION',
+    reason: 'NET_ACCOUNT_R_EXECUTION',
     activeFolds: foldEvidence.filter(({ metrics }) => metrics.trades > 0).length,
     positiveFolds: foldTotals.filter((total) => total > 0).length,
     ...riskSummary(observations),

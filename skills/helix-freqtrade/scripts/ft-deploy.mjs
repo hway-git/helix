@@ -115,6 +115,11 @@ const ENV_FILE   = ENV ? ENV.envFile           : envFileCandidates()[0]; // host
 const FT_API_URL = process.env.FREQTRADE_URL || process.env.FT_API_URL || 'http://127.0.0.1:8888';
 const FT_API_PORT = Number(new URL(FT_API_URL).port || 8888);
 const BACKTEST_EVIDENCE_VERSION = 2;
+// Research-only walk-forward bundles may omit a versioned policy. They still
+// need an explicit account-R scale for execution evidence, while the report's
+// VERSIONED_GATE_POLICY_PRESENT check keeps them permanently non-promotable.
+const UNVERSIONED_WALK_FORWARD_RISK_UNIT_RATIO = 0.01;
+const UNVERSIONED_WALK_FORWARD_ACCOUNT_EQUITY = 1000;
 const BACKTEST_EVIDENCE_FILE = resolve(USER_DATA, 'backtest_results', '.helix-evidence.json');
 const SIGNAL_ARTIFACT_DIR = resolve(USER_DATA, 'helix', 'signals');
 const SIGNAL_BACKTEST_DATA_DIR = resolve(USER_DATA, 'helix', 'backtest-data');
@@ -3255,6 +3260,10 @@ const actions = {
     }
 
     const runtimeAdapterBundle = signalAdapterBundleFromDirectory(SIGNAL_ADAPTER_ASSET_DIR);
+    const riskUnitRatio = bundle.plan.walkForwardPolicy?.plan.riskUnitRatio
+      ?? UNVERSIONED_WALK_FORWARD_RISK_UNIT_RATIO;
+    const accountEquity = bundle.plan.walkForwardPolicy?.plan.referenceAccountEquity
+      ?? UNVERSIONED_WALK_FORWARD_ACCOUNT_EQUITY;
     const foldEvidence = [];
     for (const [foldIndex, fold] of bundle.folds.entries()) {
       const scenarioEvidence = [];
@@ -3262,8 +3271,8 @@ const actions = {
         const result = runBacktestSubprocess({
           signal_artifact: resolve(bundle.directory, fold.run.executionArtifactFile),
           historical_risk_trace: resolve(bundle.directory, fold.run.executionRiskTraceFile),
-          risk_unit_ratio: bundle.plan.walkForwardPolicy?.plan.riskUnitRatio,
-          account_equity: bundle.plan.walkForwardPolicy?.plan.referenceAccountEquity,
+          risk_unit_ratio: riskUnitRatio,
+          account_equity: accountEquity,
           market_dataset: resolve(bundle.directory, fold.run.datasetFile),
           fee: scenario.fee,
         });
@@ -3282,7 +3291,7 @@ const actions = {
             signalArtifact: fold.executionArtifact,
             riskTrace: fold.executionRiskTrace,
             marketDataset: fold.dataset,
-            riskUnitRatio: bundle.plan.walkForwardPolicy?.plan.riskUnitRatio,
+            riskUnitRatio,
             accountEquity: record.executionEnvironment?.configIdentity?.dryRunWallet,
           },
         );
@@ -3322,7 +3331,7 @@ const actions = {
           datasetHash: fold.dataset.datasetHash,
           executionArtifactHash: fold.executionArtifact.artifactHash,
           riskTraceHash: fold.executionRiskTrace.traceHash,
-          riskUnitRatio: bundle.plan.walkForwardPolicy.plan.riskUnitRatio,
+          riskUnitRatio,
           scenarioId: scenario.id,
           fee: scenario.fee,
           freqtradeVersion: environment.freqtradeVersion,
@@ -3340,7 +3349,7 @@ const actions = {
           executionProfileHash: walkForwardEvidenceHash(environment.executionProfile),
           adapterHash: `sha256:${record.strategyHash}`,
           riskTraceHash: fold.executionRiskTrace.traceHash,
-          riskUnitRatio: bundle.plan.walkForwardPolicy.plan.riskUnitRatio,
+          riskUnitRatio,
           runtimeEvidenceFile: runtimeArchive.file,
           runtimeEvidenceHash: runtimeArchive.hash,
           resultFile: archiveWalkForwardEvidence(

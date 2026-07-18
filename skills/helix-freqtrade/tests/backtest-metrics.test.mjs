@@ -275,15 +275,17 @@ function riskMetricFixture() {
   return { summary, signalArtifact, riskTrace, marketDataset, accountEquity, riskUnitRatio };
 }
 
-test('computes net realized R and exact-dataset MFE/MAE from the locked initial risk', () => {
+test('computes net realized R and exact-dataset MFE/MAE in account-equity risk units', () => {
   const fixture = riskMetricFixture();
   const metrics = backtestMetrics(fixture.summary, fixture);
   assert.equal(metrics.riskNormalized.available, true);
-  assert.equal(metrics.riskNormalized.reason, 'NET_FREQTRADE_EXECUTION');
-  assert.ok(Math.abs(metrics.riskNormalized.expectancyR - 0.1) < 1e-12);
-  assert.ok(Math.abs(metrics.riskNormalized.maxDrawdownR - 0.6) < 1e-12);
-  assert.ok(Math.abs(metrics.riskNormalized.mfeR - (5 / 7)) < 1e-12);
-  assert.ok(Math.abs(metrics.riskNormalized.maeR - (8 / 7)) < 1e-12);
+  assert.equal(metrics.riskNormalized.reason, 'NET_ACCOUNT_R_EXECUTION');
+  assert.ok(Math.abs(metrics.riskNormalized.expectancyR - 0.065) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.maxDrawdownR - 0.15) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.mfeR - (29 / 140)) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.maeR - (12 / 35)) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.observations[0].realizedR - 0.28) < 1e-12);
+  assert.ok(Math.abs(metrics.riskNormalized.observations[1].realizedR + 0.15) < 1e-12);
   assert.ok(Math.abs(metrics.riskNormalized.observations[0].expectedRiskBudget - 3.5) < 1e-12);
   assert.ok(Math.abs(metrics.riskNormalized.observations[0].stakeAmount - 51) < 1e-12);
 });

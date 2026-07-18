@@ -154,6 +154,7 @@ function riskNormalizedMetrics(summary, context) {
       throw new Error(`${name}.stake_amount does not match its account-equity risk budget within execution precision`);
     }
     const profitAbs = requiredFinite(trade.profit_abs, `${name}.profit_abs`);
+    const accountRiskUnit = accountEquity * riskUnitRatio;
     const high = Math.max(...exposure.map((candle) => candle.high));
     const low = Math.min(...exposure.map((candle) => candle.low));
     const favorableDistance = risk.side === 'LONG' ? high - openRate : openRate - low;
@@ -162,10 +163,11 @@ function riskNormalizedMetrics(summary, context) {
       entrySignalId: risk.entrySignalId,
       openTime,
       closeTime,
-      // Freqtrade profit_ratio is net of fees and includes futures leverage.
-      realizedR: profitRatio / ((executionRiskDistance / openRate) * leverage),
-      mfeR: Math.max(0, favorableDistance / executionRiskDistance),
-      maeR: Math.max(0, adverseDistance / executionRiskDistance),
+      // One R is the policy-defined fraction of account equity. riskR only
+      // scales this trade's budget inside that account-level unit.
+      realizedR: profitAbs / accountRiskUnit,
+      mfeR: Math.max(0, (stakeAmount * leverage * favorableDistance / openRate) / accountRiskUnit),
+      maeR: Math.max(0, (stakeAmount * leverage * adverseDistance / openRate) / accountRiskUnit),
       riskUnitRatio,
       riskR: risk.riskR,
       leverage,
@@ -196,7 +198,7 @@ function riskNormalizedMetrics(summary, context) {
     / observations.length;
   return {
     available: true,
-    reason: 'NET_FREQTRADE_EXECUTION',
+    reason: 'NET_ACCOUNT_R_EXECUTION',
     expectancyR: average('realizedR'),
     maxDrawdownR,
     mfeR: average('mfeR'),
