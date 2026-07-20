@@ -490,7 +490,7 @@ test('Freqtrade adapter contains only artifact loading and four-column timestamp
   assert.doesNotMatch(source, /\b(?:rsi|macd|ema|atr|liquidity_sweep|breakout_failure|momentum_burst)\b/i);
 });
 
-test('Freqtrade adapter preserves LONG tags when the second side has no signal', async () => {
+test('Freqtrade adapter preserves LONG tags and exchange-rounded candle-bound exits', async () => {
   const harness = `
 import importlib.util
 import json
@@ -514,6 +514,8 @@ class Series:
         return Series(value // divisor for value in self.values)
 
     def map(self, mapping):
+        if callable(mapping):
+            return Series((mapping(value) for value in self.values), self.unit)
         return Series(mapping.get(value) for value in self.values)
 
     def notna(self):
@@ -553,6 +555,9 @@ class DataFrame:
         return Series(self.columns[column], 'ms' if column == 'date' else None)
 
     def __setitem__(self, column, value):
+        if isinstance(value, Series):
+            self.columns[column] = list(value.values)
+            return
         row_count = len(next(iter(self.columns.values())))
         self.columns[column] = [value] * row_count
 
@@ -597,7 +602,15 @@ indexes = {
 }
 strategy = module.HelixSignalStrategy()
 strategy._signal_index = lambda _pair: indexes
-frame = DataFrame({'date': [first]})
+os.environ['HELIX_SIGNAL_ARTIFACT_OVERRIDE'] = '1'
+frame = DataFrame({
+    'date': [first],
+    'open': [2.3707000000000003],
+    'high': [2.3796],
+    'low': [2.3707000000000003],
+    'close': [2.3778],
+})
+strategy.populate_indicators(frame, {'pair': 'BTC/USDT:USDT'})
 strategy.populate_entry_trend(frame, {'pair': 'BTC/USDT:USDT'})
 strategy.populate_exit_trend(frame, {'pair': 'BTC/USDT:USDT'})
 print(json.dumps(frame.columns))
@@ -610,6 +623,10 @@ print(json.dumps(frame.columns))
   assert.deepEqual(columns.exit_long, [1]);
   assert.deepEqual(columns.exit_short, [0]);
   assert.deepEqual(columns.exit_tag, ['exit-long']);
+  assert.equal(2.3707 >= columns.low[0], true);
+  assert.equal(2.3707 <= columns.high[0], true);
+  assert.equal(columns.open[0], 2.3707000000000003);
+  assert.equal(columns.close[0], 2.3778);
 });
 
 test('adapter pins the configured hash and uses an explicit backtest override', async (t) => {

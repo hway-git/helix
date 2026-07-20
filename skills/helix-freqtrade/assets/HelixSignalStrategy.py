@@ -373,6 +373,17 @@ class HelixSignalStrategy(IStrategy):
         dataframe.loc[matched, tag_column] = tags.loc[matched]
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        if not self._artifact_override_enabled():
+            return dataframe
+        # Freqtrade clamps exit limits to candle bounds before exchange precision
+        # rounding, then requires the rounded float to remain inside those bounds.
+        # Preserve the exchange-price envelope across that float-only boundary.
+        dataframe["low"] = dataframe["low"].map(
+            lambda value: math.nextafter(float(value), -math.inf)
+        )
+        dataframe["high"] = dataframe["high"].map(
+            lambda value: math.nextafter(float(value), math.inf)
+        )
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
