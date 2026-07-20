@@ -29,6 +29,7 @@ import {
 import { historicalRiskTraceHash } from '../lib/historical-risk.mjs';
 import { marketDatasetHash } from '../lib/market-dataset.mjs';
 import { signalArtifactHash } from '../lib/signal-artifact.mjs';
+import { createPromotableWalkForwardReport } from './helpers/promotable-report.mjs';
 
 const execFileAsync = promisify(execFile);
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -789,6 +790,8 @@ test('rebuilds every versioned policy gate from archived trade-level R evidence'
     },
     strategyLifecycle: report.candidate.lifecycle,
     objectModel: report.candidate.objectModel,
+    symbol: bundle.plan.sourceDataset.source.symbol,
+    baseTimeframe: bundle.plan.baseTimeframe,
   };
   assert.equal(loadPromotableWalkForwardReport(reportFile, artifact).report.reportHash, report.reportHash);
   assert.throws(
@@ -798,6 +801,35 @@ test('rebuilds every versioned policy gate from archived trade-level R evidence'
     }),
     /does not match the Signal Artifact identity/,
   );
+  assert.throws(
+    () => loadPromotableWalkForwardReport(reportFile, { ...artifact, symbol: 'ETH/USDT:USDT' }),
+    /source dataset symbol does not match the Signal Artifact symbol/,
+  );
+  assert.throws(
+    () => loadPromotableWalkForwardReport(reportFile, { ...artifact, baseTimeframe: '5m' }),
+    /base timeframe does not match/,
+  );
+  for (const [field, source] of [
+    ['provider', {
+      provider: 'binance', market: 'futures', instrumentId: 'BTC-USDT-SWAP', symbol: artifact.symbol,
+    }],
+    ['market', {
+      provider: 'okx', market: 'swap', instrumentId: 'BTC-USDT-SWAP', symbol: artifact.symbol,
+    }],
+    ['instrumentId', {
+      provider: 'okx', market: 'futures', instrumentId: 'BTC-USDT-PERP', symbol: artifact.symbol,
+    }],
+  ]) {
+    const invalid = await createPromotableWalkForwardReport(
+      join(directory, `invalid-source-${field}`),
+      artifact,
+      { source },
+    );
+    assert.throws(
+      () => loadPromotableWalkForwardReport(invalid.reportFile, artifact),
+      new RegExp(`source ${field} does not match`),
+    );
+  }
 
   const forged = JSON.parse(JSON.stringify(report));
   forged.aggregate.scenarios[0].riskNormalized.observations[0].realizedR += 1;

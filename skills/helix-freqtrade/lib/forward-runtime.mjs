@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { walkForwardReportHash } from './walk-forward.mjs';
+import { verifyWalkForwardEvidenceReportFile } from './walk-forward-portfolio.mjs';
+import { okxForwardSource, okxInstrumentId } from './forward-target.mjs';
 
 export const FORWARD_DEPLOYMENT_SCHEMA_VERSION = 'helix.forward-deployment/v1';
 const HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
@@ -11,6 +13,7 @@ const COMMIT_PATTERN = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
 const DRY_RUN_LIFECYCLES = new Set(['shadow', 'canary', 'production']);
 export const FORWARD_WORKER_OWNER_SCHEMA_VERSION = 'helix.forward-worker-owner/v1';
 const OWNER_TOKEN_PATTERN = /^[a-f0-9]{32}$/;
+const REPORT_ARCHIVE_VERIFY_INTERVAL_MS = 1_000;
 
 function exactFields(value, name, fields) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${name} must be an object`);
@@ -102,6 +105,22 @@ function emergencyStopHash(file) {
   return `sha256:${createHash('sha256').update(readFileSync(file)).digest('hex')}`;
 }
 
+function reportArchiveStatFingerprint(files) {
+  const digest = createHash('sha256');
+  for (const file of files) {
+    const stat = statSync(file, { bigint: true });
+    if (!stat.isFile()) throw new Error(`walk-forward report archive is not a file: ${file}`);
+    digest.update(`${file}\0${stat.size}\0${stat.mtimeNs}\0${stat.ctimeNs}\0`);
+  }
+  return `sha256:${digest.digest('hex')}`;
+}
+
+export function forwardReportArchiveNeedsVerification(state, { reportFile, reportHash, fingerprint }) {
+  return state.reportFile !== reportFile
+    || state.reportHash !== reportHash
+    || state.reportArchiveFingerprint !== fingerprint;
+}
+
 function watchdogGuard(params, guardState) {
   try {
     const owner = verifyForwardWorkerOwner(readJson(params.pidFile), params.deploymentHash);
@@ -122,6 +141,24 @@ function watchdogGuard(params, guardState) {
       const payload = Object.fromEntries(Object.entries(report).filter(([field]) => field !== 'reportHash'));
       if (report.reportHash !== deployment.walkForwardReportHash
         || walkForwardReportHash(payload) !== deployment.walkForwardReportHash) return false;
+      const reportFile = config.helix_signal_walk_forward_report_path;
+      const reportHash = deployment.walkForwardReportHash;
+      const pinChanged = guardState.reportFile !== reportFile || guardState.reportHash !== reportHash;
+      const now = Date.now();
+      if (pinChanged || now - guardState.reportArchiveStatCheckedAt >= REPORT_ARCHIVE_VERIFY_INTERVAL_MS) {
+        const fingerprint = pinChanged
+          ? null
+          : reportArchiveStatFingerprint(guardState.reportArchiveFiles);
+        if (forwardReportArchiveNeedsVerification(guardState, { reportFile, reportHash, fingerprint })) {
+          const verified = verifyWalkForwardEvidenceReportFile(reportFile);
+          if (verified.report.reportHash !== reportHash) return false;
+          guardState.reportFile = reportFile;
+          guardState.reportHash = reportHash;
+          guardState.reportArchiveFiles = verified.archiveFiles;
+          guardState.reportArchiveFingerprint = reportArchiveStatFingerprint(verified.archiveFiles);
+        }
+        guardState.reportArchiveStatCheckedAt = now;
+      }
     }
     return config?.helix_signal_forward_deployment_hash === params.deploymentHash;
   } catch {
@@ -206,7 +243,14 @@ export async function runForwardWorkerWatchdog(paramsValue) {
   if (!params.workerParams || typeof params.workerParams !== 'object' || Array.isArray(params.workerParams)) {
     throw new Error('forward watchdog workerParams must be an object');
   }
-  const guardState = { initialLatchStillAllowed: params.allowedInitialEmergencyStopHash !== null };
+  const guardState = {
+    initialLatchStillAllowed: params.allowedInitialEmergencyStopHash !== null,
+    reportFile: null,
+    reportHash: null,
+    reportArchiveFiles: [],
+    reportArchiveFingerprint: null,
+    reportArchiveStatCheckedAt: 0,
+  };
   await waitForInitialWatchdogOwnership(params, guardState);
 
   let stopping = false;
@@ -296,11 +340,7 @@ export function verifyForwardDeployment(value) {
   return value;
 }
 
-export function okxInstrumentId(symbol) {
-  const match = /^([A-Z0-9]+)\/([A-Z0-9]+):\2$/.exec(String(symbol || '').toUpperCase());
-  if (!match) throw new Error(`Forward Signal deployment requires an OKX perpetual symbol, received ${symbol}`);
-  return `${match[1]}-${match[2]}-SWAP`;
-}
+export { okxInstrumentId };
 
 export function createForwardDeployment(
   artifact,
@@ -321,14 +361,15 @@ export function createForwardDeployment(
   if (walkForwardReportHash !== null && !HASH_PATTERN.test(walkForwardReportHash || '')) {
     throw new Error('Forward deployment requires a valid walk-forward report hash.');
   }
+  const target = okxForwardSource(artifact.symbol);
   const payload = {
     schemaVersion: FORWARD_DEPLOYMENT_SCHEMA_VERSION,
     deploymentId,
     mode: 'dry_run',
     activatedAt,
-    provider: 'okx',
-    instrumentId: okxInstrumentId(artifact.symbol),
-    symbol: artifact.symbol,
+    provider: target.provider,
+    instrumentId: target.instrumentId,
+    symbol: target.symbol,
     ...(walkForwardReportHash ? { walkForwardReportHash } : {}),
     strategy: {
       id: identity.strategyId,

@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { signalArtifactHash } from '../lib/signal-artifact.mjs';
+import { walkForwardPortfolioPlanHash } from '../lib/walk-forward-portfolio.mjs';
 import { createPromotableWalkForwardReport } from './helpers/promotable-report.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -30,6 +31,15 @@ function sha256(content) {
 function processIsAlive(pid) {
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+}
+
+async function waitUntil(predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return true;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  return false;
 }
 
 function artifactFixture() {
@@ -438,6 +448,70 @@ test('managed deployment commits an immutable artifact pointer only after the fl
   const dockerCalls = await readFile(setup.dockerLog, 'utf8');
   assert.match(dockerCalls, / stop freqtrade/);
   assert.match(dockerCalls, / up -d --no-deps freqtrade/);
+});
+
+test('managed portfolio deployment stops its watchdog after nested archive tampering', async (t) => {
+  const setup = await setupManagedDeployment(t);
+  const sources = [
+    { provider: 'okx', market: 'futures', instrumentId: 'BTC-USDT-SWAP', symbol: 'BTC/USDT:USDT' },
+    { provider: 'okx', market: 'futures', instrumentId: 'ETH-USDT-SWAP', symbol: 'ETH/USDT:USDT' },
+  ];
+  const members = await Promise.all(sources.map((source, index) => createPromotableWalkForwardReport(
+    join(setup.home, `portfolio-source-${index}`),
+    { ...setup.artifact, symbol: source.symbol },
+    { source, symbolStabilityMembers: sources, minimumStableSymbolRatio: 1 },
+  )));
+  const reference = members[0].bundle.plan;
+  const bySymbol = new Map(members.map((member) => [member.bundle.plan.sourceDataset.source.symbol, member]));
+  const planPayload = {
+    schemaVersion: 'helix.walk-forward-portfolio-plan/v1',
+    mode: 'fixed_candidate_multi_symbol',
+    candidate: reference.candidate,
+    walkForwardPolicy: reference.walkForwardPolicy,
+    members: sources.map((source) => {
+      const member = bySymbol.get(source.symbol);
+      return {
+        source,
+        sourceDatasetHash: member.bundle.plan.sourceDataset.datasetHash,
+        capturedThrough: member.bundle.plan.sourceDataset.capturedThrough,
+        planHash: member.bundle.plan.planHash,
+        runHash: member.bundle.run.runHash,
+      };
+    }),
+    baseTimeframe: reference.baseTimeframe,
+    requiredTimeframes: reference.requiredTimeframes,
+    activationDecisionTime: reference.activationDecisionTime,
+    warmupDurationMs: reference.warmupDurationMs,
+    folds: reference.folds,
+    executionScenarios: reference.executionScenarios,
+  };
+  const portfolioPlan = { ...planPayload, planHash: walkForwardPortfolioPlanHash(planPayload) };
+  const portfolioPlanFile = join(setup.home, 'portfolio-plan.json');
+  await writeFile(portfolioPlanFile, `${JSON.stringify(portfolioPlan, null, 2)}\n`);
+  const portfolio = JSON.parse((await setup.runAction('walk_forward_portfolio', {
+    portfolio_plan: portfolioPlanFile,
+    reports: members.map(({ reportFile }) => reportFile).reverse(),
+    output_directory: join(setup.home, 'portfolio-report'),
+  })).stdout);
+  assert.equal(portfolio.promotable, true);
+
+  const result = JSON.parse((await setup.runAction('deploy', {
+    signal_artifact_hash: setup.artifact.artifactHash,
+    walk_forward_report: portfolio.reportFile,
+    dry_run: true,
+    max_open_trades: 1,
+  })).stdout);
+  assert.equal(result.success, true);
+  assert.equal(result.walk_forward_report.hash, portfolio.reportHash);
+  const config = JSON.parse(await readFile(setup.configFile, 'utf8'));
+  assert.equal(config.helix_signal_walk_forward_report_hash, portfolio.reportHash);
+
+  const portfolioReport = JSON.parse(await readFile(portfolio.reportFile, 'utf8'));
+  const memberFile = resolve(dirname(portfolio.reportFile), portfolioReport.members[0].reportFile);
+  const memberReport = JSON.parse(await readFile(memberFile, 'utf8'));
+  const nestedEvidence = resolve(dirname(memberFile), memberReport.coreEvidence.files[0].file);
+  await writeFile(nestedEvidence, 'tampered\n');
+  assert.equal(await waitUntil(() => !processIsAlive(result.forward_runtime.worker_pid)), true);
 });
 
 test('managed Signal deployment rejects a missing promotable walk-forward report', async (t) => {

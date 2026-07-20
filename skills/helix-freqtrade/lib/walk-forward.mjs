@@ -13,6 +13,7 @@ import { verifyExecutionRuntimeArchive } from './execution-runtime-evidence.mjs'
 import { verifyHistoricalRiskTrace } from './historical-risk.mjs';
 import { marketDatasetHash, marketTimeframeMilliseconds, verifyMarketDataset } from './market-dataset.mjs';
 import { verifySignalArtifact } from './signal-artifact.mjs';
+import { assertOkxForwardSource } from './forward-target.mjs';
 
 export const WALK_FORWARD_PLAN_SCHEMA_VERSION = 'helix.walk-forward-plan/v1';
 export const WALK_FORWARD_RUN_SCHEMA_VERSION = 'helix.walk-forward-run/v1';
@@ -190,9 +191,12 @@ function normalizeWalkForwardPolicy(value) {
   const policy = exactRecord(value, 'walkForwardPolicy', [
     'schemaVersion', 'id', 'version', 'strategyId', 'strategyVersion', 'policyPath', 'policyHash', 'plan', 'gates',
   ]);
-  if (policy.schemaVersion !== 'helix.walk-forward-policy/v1') {
+  const schemaVersion = text(policy.schemaVersion, 'walkForwardPolicy.schemaVersion');
+  if (schemaVersion !== 'helix.walk-forward-policy/v1'
+    && schemaVersion !== 'helix.walk-forward-policy/v2') {
     throw new Error('walkForwardPolicy.schemaVersion is unsupported');
   }
+  const hasSymbolStability = schemaVersion === 'helix.walk-forward-policy/v2';
   const id = text(policy.id, 'walkForwardPolicy.id');
   const version = text(policy.version, 'walkForwardPolicy.version');
   if (!/^[a-z][a-z0-9_]*_v[0-9]+$/.test(id)) throw new Error('walkForwardPolicy.id is invalid');
@@ -211,6 +215,7 @@ function normalizeWalkForwardPolicy(value) {
   const gates = exactRecord(policy.gates, 'walkForwardPolicy.gates', [
     'censoredEntries', 'minimumTotalTrades', 'minimumActiveFoldRatio', 'minimumPositiveFoldRatio',
     'minimumExpectancyR', 'minimumProfitFactor', 'maximumDrawdownR', 'segmentStability',
+    ...(hasSymbolStability ? ['symbolStability'] : []),
   ]);
   if (gates.censoredEntries !== 'reject') throw new Error('walkForwardPolicy.gates.censoredEntries must be reject');
   const segment = exactRecord(gates.segmentStability, 'walkForwardPolicy.gates.segmentStability', [
@@ -230,8 +235,44 @@ function normalizeWalkForwardPolicy(value) {
   if (new Set(dimensions).size !== dimensions.length) {
     throw new Error('walkForwardPolicy.gates.segmentStability.dimensions contains duplicates');
   }
+  let symbolStability;
+  if (hasSymbolStability) {
+    const symbolGate = exactRecord(
+      gates.symbolStability,
+      'walkForwardPolicy.gates.symbolStability',
+      ['members', 'minimumStableSymbolRatio'],
+    );
+    if (!Array.isArray(symbolGate.members) || symbolGate.members.length < 2) {
+      throw new Error('walkForwardPolicy.gates.symbolStability.members must contain at least two symbols');
+    }
+    const members = symbolGate.members.map((member, index) => (
+      source(member, `walkForwardPolicy.gates.symbolStability.members[${index}]`)
+    ));
+    if (new Set(members.map(({ symbol }) => symbol)).size !== members.length) {
+      throw new Error('walkForwardPolicy.gates.symbolStability.members contains duplicate symbols');
+    }
+    if (new Set(members.map(({ instrumentId }) => instrumentId)).size !== members.length) {
+      throw new Error('walkForwardPolicy.gates.symbolStability.members contains duplicate instrument ids');
+    }
+    const ordered = [...members].sort((left, right) => (
+      left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1
+        : left.instrumentId < right.instrumentId ? -1 : left.instrumentId > right.instrumentId ? 1 : 0
+    ));
+    if (!isDeepStrictEqual(members, ordered)) {
+      throw new Error('walkForwardPolicy.gates.symbolStability.members must be ordered by symbol and instrumentId');
+    }
+    symbolStability = {
+      members,
+      minimumStableSymbolRatio: policyNumber(
+        symbolGate.minimumStableSymbolRatio,
+        'walkForwardPolicy.gates.symbolStability.minimumStableSymbolRatio',
+        0,
+        1,
+      ),
+    };
+  }
   return {
-    schemaVersion: 'helix.walk-forward-policy/v1',
+    schemaVersion,
     id,
     version,
     strategyId: text(policy.strategyId, 'walkForwardPolicy.strategyId'),
@@ -290,6 +331,7 @@ function normalizeWalkForwardPolicy(value) {
           1,
         ),
       },
+      ...(symbolStability ? { symbolStability } : {}),
     },
   };
 }
@@ -1405,6 +1447,15 @@ export function createWalkForwardReport(bundle, foldEvidence, coreEvidenceValue)
       policy ? ['walkForwardPolicy'] : ['candidate.strategyConfigHash'],
     ),
   ];
+  if (policy?.schemaVersion === 'helix.walk-forward-policy/v2') {
+    checks.push(gateCheck(
+      'SYMBOL_STABILITY_GATE_SATISFIED',
+      false,
+      false,
+      true,
+      ['walkForwardPolicy.gates.symbolStability', 'portfolioReport'],
+    ));
+  }
   if (policy) {
     const scenarioRequirement = (field, required) => ({
       scenarios: scenarios.map((scenario) => ({
@@ -1676,6 +1727,13 @@ export function loadPromotableWalkForwardReport(reportFile, artifact) {
     resolve(reportDirectory, coreEvidence.runFile),
     resolve(reportDirectory, coreEvidence.sourceDatasetFile),
   );
+  if (artifact.symbol !== bundle.plan.sourceDataset.source.symbol) {
+    throw new Error('walk-forward report source dataset symbol does not match the Signal Artifact symbol');
+  }
+  if (artifact.baseTimeframe !== bundle.plan.baseTimeframe) {
+    throw new Error('Signal Artifact base timeframe does not match the walk-forward plan');
+  }
+  assertOkxForwardSource(bundle.plan.sourceDataset.source, artifact.symbol, 'Signal Artifact forward source');
   if (!bundle.plan.walkForwardPolicy) throw new Error('walk-forward report archive has no versioned policy');
   return { file, report, walkForwardPolicy: bundle.plan.walkForwardPolicy };
 }

@@ -196,13 +196,16 @@ function policyNumber(value: unknown, name: string, minimum?: number, maximum?: 
   return value
 }
 
-function normalizeWalkForwardPolicy(value: unknown): StrategyWalkForwardPolicy {
+export function assertStrategyWalkForwardPolicy(value: unknown): StrategyWalkForwardPolicy {
   const policy = exactRecord(value, 'walkForwardPolicy', [
     'schemaVersion', 'id', 'version', 'strategyId', 'strategyVersion', 'policyPath', 'policyHash', 'plan', 'gates',
   ])
-  if (policy.schemaVersion !== 'helix.walk-forward-policy/v1') {
+  const schemaVersion = text(policy.schemaVersion, 'walkForwardPolicy.schemaVersion')
+  if (schemaVersion !== 'helix.walk-forward-policy/v1'
+    && schemaVersion !== 'helix.walk-forward-policy/v2') {
     throw new Error('walkForwardPolicy.schemaVersion is unsupported')
   }
+  const hasSymbolStability = schemaVersion === 'helix.walk-forward-policy/v2'
   const id = text(policy.id, 'walkForwardPolicy.id')
   const version = text(policy.version, 'walkForwardPolicy.version')
   if (!/^[a-z][a-z0-9_]*_v[0-9]+$/.test(id)) throw new Error('walkForwardPolicy.id is invalid')
@@ -237,6 +240,7 @@ function normalizeWalkForwardPolicy(value: unknown): StrategyWalkForwardPolicy {
     'minimumProfitFactor',
     'maximumDrawdownR',
     'segmentStability',
+    ...(hasSymbolStability ? ['symbolStability'] : []),
   ])
   if (gates.censoredEntries !== 'reject') throw new Error('walkForwardPolicy.gates.censoredEntries must be reject')
   const segment = exactRecord(gates.segmentStability, 'walkForwardPolicy.gates.segmentStability', [
@@ -256,8 +260,44 @@ function normalizeWalkForwardPolicy(value: unknown): StrategyWalkForwardPolicy {
   if (new Set(dimensions).size !== dimensions.length) {
     throw new Error('walkForwardPolicy.gates.segmentStability.dimensions contains duplicates')
   }
+  let symbolStability: StrategyWalkForwardPolicy['gates']['symbolStability']
+  if (hasSymbolStability) {
+    const symbolGate = exactRecord(
+      gates.symbolStability,
+      'walkForwardPolicy.gates.symbolStability',
+      ['members', 'minimumStableSymbolRatio'],
+    )
+    if (!Array.isArray(symbolGate.members) || symbolGate.members.length < 2) {
+      throw new Error('walkForwardPolicy.gates.symbolStability.members must contain at least two symbols')
+    }
+    const members = symbolGate.members.map((member, index) => (
+      source(member, `walkForwardPolicy.gates.symbolStability.members[${index}]`)
+    ))
+    if (new Set(members.map(({ symbol }) => symbol)).size !== members.length) {
+      throw new Error('walkForwardPolicy.gates.symbolStability.members contains duplicate symbols')
+    }
+    if (new Set(members.map(({ instrumentId }) => instrumentId)).size !== members.length) {
+      throw new Error('walkForwardPolicy.gates.symbolStability.members contains duplicate instrument ids')
+    }
+    const ordered = [...members].sort((left, right) => (
+      left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1
+        : left.instrumentId < right.instrumentId ? -1 : left.instrumentId > right.instrumentId ? 1 : 0
+    ))
+    if (!isDeepStrictEqual(members, ordered)) {
+      throw new Error('walkForwardPolicy.gates.symbolStability.members must be ordered by symbol and instrumentId')
+    }
+    symbolStability = {
+      members,
+      minimumStableSymbolRatio: policyNumber(
+        symbolGate.minimumStableSymbolRatio,
+        'walkForwardPolicy.gates.symbolStability.minimumStableSymbolRatio',
+        0,
+        1,
+      ),
+    }
+  }
   return {
-    schemaVersion: 'helix.walk-forward-policy/v1',
+    schemaVersion,
     id,
     version,
     strategyId: text(policy.strategyId, 'walkForwardPolicy.strategyId'),
@@ -320,6 +360,7 @@ function normalizeWalkForwardPolicy(value: unknown): StrategyWalkForwardPolicy {
           1,
         ),
       },
+      ...(symbolStability ? { symbolStability } : {}),
     },
   }
 }
@@ -427,7 +468,7 @@ function normalizePlanPayload(value: unknown): StrategyWalkForwardPlanPayload {
     throw new Error('executionScenarios must include at least one higher fee')
   }
   const normalizedCandidate = candidate(parsed.candidate)
-  const walkForwardPolicy = hasPolicy ? normalizeWalkForwardPolicy(parsed.walkForwardPolicy) : undefined
+  const walkForwardPolicy = hasPolicy ? assertStrategyWalkForwardPolicy(parsed.walkForwardPolicy) : undefined
   if (walkForwardPolicy) assertPlanMatchesPolicy(walkForwardPolicy, normalizedCandidate, folds, executionScenarios)
   return {
     schemaVersion: STRATEGY_WALK_FORWARD_PLAN_SCHEMA_VERSION,

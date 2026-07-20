@@ -57,6 +57,28 @@ gates:
     minimum_stable_segment_ratio: 0.5
 `
 
+const walkForwardPolicyV2 = walkForwardPolicy
+  .replace('helix.walk-forward-policy/v1', 'helix.walk-forward-policy/v2')
+  .replace('version: 1.0.0', 'version: 2.0.0')
+  .replace(
+    '    minimum_stable_segment_ratio: 0.5\n',
+    [
+      '    minimum_stable_segment_ratio: 0.5',
+      '  symbol_stability:',
+      '    members:',
+      '      - provider: okx',
+      '        market: futures',
+      '        instrument_id: BTC-USDT-SWAP',
+      '        symbol: BTC/USDT:USDT',
+      '      - provider: okx',
+      '        market: futures',
+      '        instrument_id: ETH-USDT-SWAP',
+      '        symbol: ETH/USDT:USDT',
+      '    minimum_stable_symbol_ratio: 0.5',
+      '',
+    ].join('\n'),
+  )
+
 function commitRepository(root: string) {
   execFileSync('git', ['init', '-b', 'main'], { cwd: root })
   execFileSync('git', ['config', 'user.email', 'helix-test@example.com'], { cwd: root })
@@ -132,6 +154,74 @@ test('loads a referenced walk-forward policy from the pinned Git tree', async ()
     assert.equal(snapshot.manifests[0]?.walkForwardPolicy?.plan.riskUnitRatio, 0.01)
     assert.equal(snapshot.manifests[0]?.walkForwardPolicy?.plan.referenceAccountEquity, 10_000)
     assert.match(snapshot.manifests[0]?.walkForwardPolicy?.policyHash ?? '', /^sha256:[a-f0-9]{64}$/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('loads a V2 walk-forward policy with a precommitted symbol universe', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'helix-strategy-policy-v2-'))
+  const strategyRoot = resolve(root, 'strategies-repo')
+  const engineRoot = resolve(root, 'engine-repo')
+  mkdirSync(strategyRoot)
+  mkdirSync(engineRoot)
+
+  try {
+    initializeRepository(strategyRoot, {
+      'strategies/scalp/strategy.yaml': manifest.replace(
+        'documentation: {}',
+        'validation:\n  walk_forward_policy: validation/walk-forward-policy.yaml\ndocumentation: {}',
+      ),
+      'strategies/scalp/validation/walk-forward-policy.yaml': walkForwardPolicyV2,
+    })
+    initializeRepository(engineRoot, { 'README.md': '# Engine\n' })
+
+    const snapshot = await loadStrategyRepositorySnapshot({ strategyRepoRoot: strategyRoot, engineRepoRoot: engineRoot })
+    assert.equal(snapshot.ok, true)
+    assert.equal(snapshot.manifests[0]?.walkForwardPolicy?.schemaVersion, 'helix.walk-forward-policy/v2')
+    assert.equal(snapshot.manifests[0]?.walkForwardPolicy?.gates.symbolStability?.minimumStableSymbolRatio, 0.5)
+    assert.deepEqual(
+      snapshot.manifests[0]?.walkForwardPolicy?.gates.symbolStability?.members.map(({ symbol }) => symbol),
+      ['BTC/USDT:USDT', 'ETH/USDT:USDT'],
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('rejects an unordered V2 walk-forward policy symbol universe', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'helix-strategy-portfolio-order-'))
+  const strategyRoot = resolve(root, 'strategies-repo')
+  const engineRoot = resolve(root, 'engine-repo')
+  mkdirSync(strategyRoot)
+  mkdirSync(engineRoot)
+
+  try {
+    initializeRepository(strategyRoot, {
+      'strategies/scalp/strategy.yaml': manifest.replace(
+        'documentation: {}',
+        'validation:\n  walk_forward_policy: validation/walk-forward-policy.yaml\ndocumentation: {}',
+      ),
+      'strategies/scalp/validation/walk-forward-policy.yaml': walkForwardPolicyV2
+        .replace(
+          /      - provider: okx\n        market: futures\n        instrument_id: BTC-USDT-SWAP\n        symbol: BTC\/USDT:USDT\n      - provider: okx\n        market: futures\n        instrument_id: ETH-USDT-SWAP\n        symbol: ETH\/USDT:USDT/,
+          [
+            '      - provider: okx',
+            '        market: futures',
+            '        instrument_id: ETH-USDT-SWAP',
+            '        symbol: ETH/USDT:USDT',
+            '      - provider: okx',
+            '        market: futures',
+            '        instrument_id: BTC-USDT-SWAP',
+            '        symbol: BTC/USDT:USDT',
+          ].join('\n'),
+        ),
+    })
+    initializeRepository(engineRoot, { 'README.md': '# Engine\n' })
+
+    const snapshot = await loadStrategyRepositorySnapshot({ strategyRepoRoot: strategyRoot, engineRepoRoot: engineRoot })
+    assert.equal(snapshot.ok, false)
+    assert.match(snapshot.errors[0] ?? '', /must be ordered by symbol and instrument_id/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -61,11 +61,16 @@ import {
 } from '../lib/execution-runtime-evidence.mjs';
 import {
   createWalkForwardReport,
-  loadPromotableWalkForwardReport,
   loadWalkForwardBundle,
   verifyWalkForwardReport,
   walkForwardEvidenceHash,
 } from '../lib/walk-forward.mjs';
+import {
+  createWalkForwardPortfolioReport,
+  loadPromotableWalkForwardEvidence,
+  verifyWalkForwardPortfolioPlan,
+  verifyWalkForwardPortfolioReport,
+} from '../lib/walk-forward-portfolio.mjs';
 import {
   createForwardDeployment,
   createForwardWorkerOwner,
@@ -703,6 +708,65 @@ function writeImmutableWalkForwardReport(directory, report) {
   return file;
 }
 
+function writeImmutableRawFile(file, content, expectedHash) {
+  if (`sha256:${createHash('sha256').update(content).digest('hex')}` !== expectedHash) {
+    throw new Error(`immutable archive source hash mismatch: ${file}`);
+  }
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  if (existsSync(file)) {
+    if (fileHash(file) !== expectedHash) throw new Error(`immutable archive is corrupt: ${file}`);
+    return;
+  }
+  const temporary = `${file}.tmp.${process.pid}`;
+  writeFileSync(temporary, content, { mode: 0o600 });
+  chmodSync(temporary, 0o600);
+  renameSync(temporary, file);
+}
+
+function archiveWalkForwardMemberReport(portfolioDirectory, reportFileValue) {
+  const reportFile = resolve(reportFileValue);
+  const sourceDirectory = dirname(reportFile);
+  const report = verifyWalkForwardReport(
+    JSON.parse(readFileSync(reportFile, 'utf8')),
+    null,
+    sourceDirectory,
+  );
+  const expectedName = `walk-forward-report-${report.reportHash.replace(':', '-')}.json`;
+  if (basename(reportFile) !== expectedName) throw new Error(`walk-forward member report file must equal ${expectedName}`);
+  const memberDirectory = resolve(portfolioDirectory, 'members', report.reportHash.replace(':', '-'));
+  const files = new Map([[basename(reportFile), fileHash(reportFile)]]);
+  for (const entry of report.coreEvidence.files) files.set(entry.file, entry.fileHash);
+  for (const fold of report.folds) {
+    for (const evidence of fold.executionEvidence) {
+      files.set(evidence.resultFile, evidence.resultHash);
+      files.set(evidence.resultMetaFile, evidence.resultMetaHash);
+      files.set(evidence.runtimeEvidenceFile, evidence.runtimeEvidenceHash);
+    }
+  }
+  for (const [relativeFile, expectedHash] of files) {
+    if (!relativeFile || relativeFile.includes('..') || relativeFile.includes('\\')) {
+      throw new Error(`walk-forward member archive path is invalid: ${relativeFile}`);
+    }
+    const sourceFile = resolve(sourceDirectory, relativeFile);
+    if (fileHash(sourceFile) !== expectedHash) {
+      throw new Error(`walk-forward member archive changed: ${sourceFile}`);
+    }
+    writeImmutableRawFile(resolve(memberDirectory, relativeFile), readFileSync(sourceFile), expectedHash);
+  }
+  const archivedReport = resolve(memberDirectory, expectedName);
+  verifyWalkForwardReport(JSON.parse(readFileSync(archivedReport, 'utf8')), null, memberDirectory);
+  return archivedReport;
+}
+
+function writeImmutableWalkForwardPortfolioReport(directory, report) {
+  const file = resolve(
+    directory,
+    `walk-forward-portfolio-report-${report.reportHash.replace(':', '-')}.json`,
+  );
+  writeImmutableJsonFile(file, report);
+  return file;
+}
+
 function strategyFingerprint(strategy) {
   const file = resolve(STRAT_DIR, `${strategy}.py`);
   if (strategy === HELIX_SIGNAL_STRATEGY) {
@@ -1010,7 +1074,7 @@ function resolveSignalWalkForwardReport(params, artifact) {
   if (value == null || value === '') return null;
   if (!artifact) throw new Error('walk_forward_report can only be used with a Signal Artifact deployment.');
   if (typeof value !== 'string' || !value.trim()) throw new Error('walk_forward_report must be a JSON file path.');
-  return loadPromotableWalkForwardReport(value.trim(), artifact);
+  return loadPromotableWalkForwardEvidence(value.trim(), artifact);
 }
 
 function requireSignalWalkForwardReport(artifact, evidence) {
@@ -1022,7 +1086,7 @@ function requireSignalWalkForwardReport(artifact, evidence) {
 
 function requireUnchangedWalkForwardReport(evidence, artifact) {
   if (!evidence) return null;
-  const current = loadPromotableWalkForwardReport(evidence.file, artifact);
+  const current = loadPromotableWalkForwardEvidence(evidence.file, artifact);
   if (current.report.reportHash !== evidence.report.reportHash) {
     throw new Error('walk-forward report changed during deployment.');
   }
@@ -1066,7 +1130,7 @@ function requireStoredWalkForwardReport(config, artifact) {
   if (typeof file !== 'string' || typeof reportHash !== 'string') {
     throw new Error('Stored Signal walk-forward report pin is incomplete.');
   }
-  const evidence = loadPromotableWalkForwardReport(file, artifact);
+  const evidence = loadPromotableWalkForwardEvidence(file, artifact);
   if (evidence.report.reportHash !== reportHash) {
     throw new Error('Stored Signal walk-forward report hash does not match its verified report.');
   }
@@ -1080,9 +1144,13 @@ function readWalkForwardReportIndex() {
 
 function recordWalkForwardReport(evidence) {
   const record = {
+    schemaVersion: evidence.report.schemaVersion,
     reportHash: evidence.report.reportHash,
     reportFile: evidence.file,
     candidate: evidence.report.candidate,
+    symbols: evidence.report.members
+      ? evidence.report.members.map(({ source: memberSource }) => memberSource.symbol)
+      : evidence.member?.source?.symbol ? [evidence.member.source.symbol] : [],
     createdAt: new Date().toISOString(),
   };
   const records = [record, ...readWalkForwardReportIndex().filter(
@@ -1111,7 +1179,7 @@ function findWalkForwardReportForArtifact(artifact) {
     if (typeof record?.reportFile !== 'string' || typeof record?.reportHash !== 'string'
       || !walkForwardCandidateMatchesArtifact(record.candidate, artifact)) continue;
     try {
-      const evidence = loadPromotableWalkForwardReport(record.reportFile, artifact);
+      const evidence = loadPromotableWalkForwardEvidence(record.reportFile, artifact);
       if (evidence.report.reportHash === record.reportHash) return evidence;
     } catch {}
   }
@@ -3458,6 +3526,52 @@ const actions = {
       reportHash: report.reportHash,
       reportFile,
       folds: report.folds.length,
+      scenarios: report.aggregate.scenarios.length,
+      promotable: report.gate.ok,
+      gate: report.gate,
+    };
+  },
+
+  walk_forward_portfolio: async (params = {}) => {
+    if (typeof params.portfolio_plan !== 'string' || !params.portfolio_plan.trim()) {
+      throw new Error('walk_forward_portfolio requires portfolio_plan.');
+    }
+    if (!Array.isArray(params.reports) || params.reports.length < 2
+      || params.reports.some((file) => typeof file !== 'string' || !file.trim())) {
+      throw new Error('walk_forward_portfolio requires at least two report file paths.');
+    }
+    const sourcePlanFile = resolve(params.portfolio_plan.trim());
+    const portfolioPlan = verifyWalkForwardPortfolioPlan(JSON.parse(readFileSync(sourcePlanFile, 'utf8')));
+    const outputDirectory = params.output_directory == null
+      ? dirname(sourcePlanFile)
+      : resolve(String(params.output_directory).trim());
+    mkdirSync(outputDirectory, { recursive: true, mode: 0o700 });
+    const archivedPlanFile = resolve(outputDirectory, 'walk-forward-portfolio-plan.json');
+    writeImmutableJsonFile(archivedPlanFile, portfolioPlan);
+    const archivedPlan = verifyWalkForwardPortfolioPlan(JSON.parse(readFileSync(archivedPlanFile, 'utf8')));
+    if (archivedPlan.planHash !== portfolioPlan.planHash) {
+      throw new Error('archived walk-forward portfolio plan identity mismatch');
+    }
+    const archivedReports = params.reports.map((file) => (
+      archiveWalkForwardMemberReport(outputDirectory, file.trim())
+    ));
+    const currentPlan = verifyWalkForwardPortfolioPlan(JSON.parse(readFileSync(sourcePlanFile, 'utf8')));
+    if (currentPlan.planHash !== portfolioPlan.planHash) {
+      throw new Error('walk-forward portfolio plan changed during report creation');
+    }
+    const report = createWalkForwardPortfolioReport(archivedPlan, archivedReports, outputDirectory);
+    const reportFile = writeImmutableWalkForwardPortfolioReport(outputDirectory, report);
+    verifyWalkForwardPortfolioReport(
+      JSON.parse(readFileSync(reportFile, 'utf8')),
+      outputDirectory,
+    );
+    recordWalkForwardReport({ file: reportFile, report });
+    return {
+      ok: true,
+      planHash: report.planHash,
+      reportHash: report.reportHash,
+      reportFile,
+      symbols: report.members.map(({ source: memberSource }) => memberSource.symbol),
       scenarios: report.aggregate.scenarios.length,
       promotable: report.gate.ok,
       gate: report.gate,

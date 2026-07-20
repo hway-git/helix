@@ -1,13 +1,16 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { assertStrategyHistoricalDataset } from './historical-dataset'
 import { loadStrategyRepositorySnapshot } from './repository'
 import {
+  assertStrategyWalkForwardPlan,
+  assertStrategyWalkForwardRun,
   assertStrategyWalkForwardCandidateSnapshot,
   createStrategyWalkForwardPlan,
   createStrategyWalkForwardPlanFromPolicy,
   runStrategyWalkForward,
 } from './walk-forward'
+import { createStrategyWalkForwardPortfolioPlan } from './walk-forward-portfolio'
 
 type UnknownRecord = Record<string, unknown>
 
@@ -46,8 +49,57 @@ async function writeJsonAtomic(file: string, value: unknown) {
 async function main() {
   const args = process.argv.slice(2).filter((value) => value !== '--')
   const action = args[0]
-  if (action !== 'run' && action !== 'run-policy') {
-    throw new Error('Usage: walk-forward-cli.ts <run|run-policy> <json-params>')
+  if (action !== 'run' && action !== 'run-policy' && action !== 'portfolio-plan') {
+    throw new Error('Usage: walk-forward-cli.ts <run|run-policy|portfolio-plan> <json-params>')
+  }
+  if (action === 'portfolio-plan') {
+    const params = exactRecord(JSON.parse(args[1] || '{}'), 'params', [
+      'strategyId', 'members', 'outputDirectory',
+    ])
+    if (!Array.isArray(params.members) || params.members.length < 2) {
+      throw new Error('params.members must contain at least two child runs')
+    }
+    const members = await Promise.all(params.members.map(async (value, index) => {
+      const member = exactRecord(value, `params.members[${index}]`, ['run'])
+      const runFile = resolve(text(member.run, `params.members[${index}].run`))
+      const run = assertStrategyWalkForwardRun(JSON.parse(await readFile(runFile, 'utf8')))
+      const plan = assertStrategyWalkForwardPlan(JSON.parse(await readFile(
+        resolve(dirname(runFile), run.planFile),
+        'utf8',
+      )))
+      return { plan, run }
+    }))
+    const snapshot = await loadStrategyRepositorySnapshot()
+    if (!snapshot.ok) throw new Error(snapshot.errors[0] || 'strategy repository unavailable')
+    const portfolioPlan = createStrategyWalkForwardPortfolioPlan({
+      snapshot,
+      strategyId: text(params.strategyId, 'params.strategyId'),
+      members,
+    })
+    const outputDirectory = resolve(text(params.outputDirectory, 'params.outputDirectory'))
+    await mkdir(outputDirectory, { recursive: true, mode: 0o700 })
+    const planFile = resolve(outputDirectory, 'walk-forward-portfolio-plan.json')
+    await writeJsonAtomic(planFile, portfolioPlan)
+    const currentSnapshot = await loadStrategyRepositorySnapshot()
+    if (!currentSnapshot.ok) throw new Error(currentSnapshot.errors[0] || 'strategy repository unavailable')
+    const currentPlan = createStrategyWalkForwardPortfolioPlan({
+      snapshot: currentSnapshot,
+      strategyId: portfolioPlan.candidate.strategyId,
+      members,
+    })
+    if (currentPlan.planHash !== portfolioPlan.planHash) {
+      throw new Error('walk-forward portfolio identity changed during plan creation')
+    }
+    return {
+      ok: true,
+      planFile,
+      planHash: portfolioPlan.planHash,
+      members: portfolioPlan.members.map(({ source, planHash, runHash }) => ({
+        symbol: source.symbol,
+        planHash,
+        runHash,
+      })),
+    }
   }
   const params = exactRecord(JSON.parse(args[1] || '{}'), 'params', [
     'dataset',

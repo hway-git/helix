@@ -14,7 +14,7 @@ export type StrategyTimeframeIdentity = {
 }
 
 export type StrategyWalkForwardPolicy = {
-  schemaVersion: 'helix.walk-forward-policy/v1'
+  schemaVersion: 'helix.walk-forward-policy/v1' | 'helix.walk-forward-policy/v2'
   id: string
   version: string
   strategyId: string
@@ -41,6 +41,10 @@ export type StrategyWalkForwardPolicy = {
       dimensions: string[]
       minimumTradesPerSegment: number
       minimumStableSegmentRatio: number
+    }
+    symbolStability?: {
+      members: StrategyHistoricalDatasetSource[]
+      minimumStableSymbolRatio: number
     }
   }
 }
@@ -396,6 +400,35 @@ export type StrategyWalkForwardRunPayload = Readonly<{
 
 export type StrategyWalkForwardRun = StrategyWalkForwardRunPayload & Readonly<{
   runHash: string
+}>
+
+export const STRATEGY_WALK_FORWARD_PORTFOLIO_PLAN_SCHEMA_VERSION =
+  'helix.walk-forward-portfolio-plan/v1' as const
+
+export type StrategyWalkForwardPortfolioPlanMember = Readonly<{
+  source: StrategyHistoricalDatasetSource
+  sourceDatasetHash: string
+  capturedThrough: number
+  planHash: string
+  runHash: string
+}>
+
+export type StrategyWalkForwardPortfolioPlanPayload = Readonly<{
+  schemaVersion: typeof STRATEGY_WALK_FORWARD_PORTFOLIO_PLAN_SCHEMA_VERSION
+  mode: 'fixed_candidate_multi_symbol'
+  candidate: StrategyWalkForwardCandidate
+  walkForwardPolicy: StrategyWalkForwardPolicy
+  members: readonly StrategyWalkForwardPortfolioPlanMember[]
+  baseTimeframe: string
+  requiredTimeframes: readonly string[]
+  activationDecisionTime: number
+  warmupDurationMs: number
+  folds: readonly StrategyWalkForwardFold[]
+  executionScenarios: readonly StrategyWalkForwardExecutionScenario[]
+}>
+
+export type StrategyWalkForwardPortfolioPlan = StrategyWalkForwardPortfolioPlanPayload & Readonly<{
+  planHash: string
 }>
 import type { Candle } from './market'
 import type { ScalpGrade, ScalpMarketRegimeType, ScalpPriceEventType } from './scalp'

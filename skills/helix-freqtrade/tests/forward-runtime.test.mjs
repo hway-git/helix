@@ -9,9 +9,10 @@ import {
   createForwardDeployment,
   createForwardWorkerOwner,
   createForwardWorkerOwnerToken,
+  forwardReportArchiveNeedsVerification,
   forwardWorkerOwnerMatchesProcess,
 } from '../lib/forward-runtime.mjs';
-import { walkForwardReportHash } from '../lib/walk-forward.mjs';
+import { createPromotableWalkForwardReport } from './helpers/promotable-report.mjs';
 
 const FORWARD_RUNTIME = resolve(new URL('../lib/forward-runtime.mjs', import.meta.url).pathname);
 
@@ -52,9 +53,11 @@ async function startWatchdog(home, {
   reportGuard = false,
 } = {}) {
   const root = join(home, 'forward');
-  const reportFile = join(home, 'walk-forward-report.json');
-  const reportPayload = { schemaVersion: 'helix.walk-forward-report/v3', test: true };
-  const reportHash = walkForwardReportHash(reportPayload);
+  const reportEvidence = reportGuard
+    ? await createPromotableWalkForwardReport(join(home, 'walk-forward'), artifact())
+    : null;
+  const reportFile = reportEvidence?.reportFile ?? null;
+  const reportHash = reportEvidence?.report.reportHash ?? null;
   const deployment = createForwardDeployment(artifact(), {
     activatedAt: 1,
     deploymentId: 'watchdog-test',
@@ -68,7 +71,6 @@ async function startWatchdog(home, {
   const statusFile = join(root, 'status.json');
   const workerFile = join(root, 'fake-worker.cjs');
   await mkdir(root, { recursive: true });
-  if (reportGuard) await writeFile(reportFile, JSON.stringify({ ...reportPayload, reportHash }));
   await writeFile(deploymentFile, JSON.stringify(deployment));
   await writeFile(configFile, JSON.stringify({
     helix_signal_forward_deployment_hash: deployment.deploymentHash,
@@ -182,6 +184,24 @@ test('forward deployment pins a promotable walk-forward report hash', () => {
     walkForwardReportHash: `sha256:${'f'.repeat(64)}`,
   });
   assert.equal(deployment.walkForwardReportHash, `sha256:${'f'.repeat(64)}`);
+});
+
+test('unchanged report archive fingerprints do not request full verification', () => {
+  const state = {
+    reportFile: '/tmp/report.json',
+    reportHash: `sha256:${'f'.repeat(64)}`,
+    reportArchiveFingerprint: `sha256:${'e'.repeat(64)}`,
+  };
+  assert.equal(forwardReportArchiveNeedsVerification(state, {
+    reportFile: state.reportFile,
+    reportHash: state.reportHash,
+    fingerprint: state.reportArchiveFingerprint,
+  }), false);
+  assert.equal(forwardReportArchiveNeedsVerification(state, {
+    reportFile: state.reportFile,
+    reportHash: state.reportHash,
+    fingerprint: `sha256:${'d'.repeat(64)}`,
+  }), true);
 });
 
 test('watchdog restarts a crashed worker and terminates its child on stop', async (t) => {

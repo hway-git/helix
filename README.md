@@ -89,7 +89,7 @@ pnpm freqtrade:install
 
 `HelixSignalStrategy` 不包含指标或策略判断。Signal 回测必须同时提供原始 `helix.market-dataset/v1`，且只使用其中与 artifact 匹配的基础周期 OHLCV。风险仓位使用 `1R = 账户权益 1%`；单笔总预算为 `账户权益 × 0.01 × riskR`，初始止损价差、开仓手续费和按初始止损价估算的平仓手续费必须共同落在该预算内，但 realized R、MFE 和 MAE 始终除以账户级的 `账户权益 × 0.01`，不能把单笔预算误称为 1R。杠杆只用于把单笔风险预算放入可用保证金范围，实际杠杆、价格风险预算、手续费风险预算和 stake 会逐笔重建并写入证据。Walk-forward 使用策略 policy 固定的参考账户权益，不能继承开发机任意的 `dry_run_wallet`；回测证据会绑定 adapter 指纹、Signal Artifact hash、策略 commit、配置 hash、Engine commit、市场数据 hash、Freqtrade 版本、运行配置和结果文件；dry-run 只接受 `shadow` 及以上 lifecycle，live 只接受 `canary` 或 `production`。
 
-当策略 manifest 已引用版本化 walk-forward policy 时，使用 Core 的 `run-policy` 从 policy 自动生成 fold、observation tail 和 fee 场景。Promotable report 会从归档成交与 initial-risk trace 重建逐笔 R、跨 fold 回撤及策略原生 segment 稳定性；Helix Signal 部署必须通过 `walk_forward_report` 提供与 Artifact 候选身份完全一致的通过报告，并将 report hash 固定进 forward deployment。
+当策略 manifest 已引用版本化 walk-forward policy 时，使用 Core 的 `run-policy` 从 policy 自动生成 fold、observation tail 和 fee 场景。Policy v2 还会预先固定跨标的验证 universe；每个标的保留独立 Core/Freqtrade 归档，组合报告从逐笔 R 重建 pooled expectancy、profit factor、symbol-fold 活跃度、策略原生 segment 和 Symbol Segments。独立单标的结果不能冒充共享资金组合回撤，组合报告只记录各标的回撤及 `worstSymbolDrawdownR`。Helix Signal 部署必须通过 `walk_forward_report` 提供覆盖 Artifact symbol、与候选身份完全一致且通过全部 gate 的组合报告，并将 report hash 固定进 forward deployment。
 
 Dashboard 控制、部署、回测、授权、急停与对账事件持久化到 `~/.helix/helix.sqlite`，数据库和凭据文件权限均为 `0600`。
 
@@ -131,29 +131,39 @@ node scripts/ft.mjs locks
 
 ### Helix Signal 回测与 dry-run
 
-以下链路只接受 clean 的 Engine 和 `helix-strategies` commit。示例是 Scalp；Swing 将 `strategyId` 改为 `helix_swing_hunter`，并使用 manifest 声明的 `1d`、`4h`、`1h`、`15m` 周期。
+以下链路只接受 clean 的 Engine 和 `helix-strategies` commit。示例是 Scalp；Swing 将 `strategyId` 改为 `helix_swing_hunter`，并使用 manifest 声明的 `1d`、`4h`、`1h`、`15m` 周期。Policy v2 当前预承诺 BTC、ETH、XRP，三者必须使用相同起止时间、activation time 和 Candidate commits。
+
+Swing 沿用既有研究基线窗口：`start=2025-07-01T00:00:00Z`、`activation=2025-09-01T00:00:00Z`、`end=2026-06-01T00:00:00Z`。从 start 到 activation 的 62 天数据前缀覆盖 61 天 warmup；activation 后覆盖 `8 x 30d` folds 和 30 天 observation tail，last observation 为 `2026-05-29T00:00:00Z`，end 为最后一个完整周期留足数据。
 
 ```bash
-# 1. 下载并固定原始市场数据
+# 1. 分别下载并固定 BTC、ETH、XRP 原始市场数据；下面命令对三个 instrument/symbol 各执行一次
 pnpm strategy:history -- fetch-okx '{"instrumentId":"BTC-USDT-SWAP","symbol":"BTC/USDT:USDT","timeframes":["1h","15m","5m","1m"],"start":"2026-01-01T00:00:00Z","end":"2026-03-03T00:00:00Z","output":"/absolute/path/source-dataset.json"}'
 
-# 2. 从策略仓库已提交的 policy 派生并运行 Core walk-forward
+# 2. 对三个 dataset 分别从同一已提交 policy 派生并运行 Core walk-forward
 pnpm strategy:walk-forward -- run-policy '{"dataset":"/absolute/path/source-dataset.json","strategyId":"helix_scalp_hunter","activationDecisionTime":"2026-01-04T00:00:00Z","outputDirectory":"/absolute/path/scalp-walk-forward"}'
 
 # 3. 生成同一候选身份的完整历史 Artifact
 pnpm strategy:backtest -- run '{"dataset":"/absolute/path/source-dataset.json","strategyId":"helix_scalp_hunter","firstDecisionTime":"2026-01-04T00:00:00Z","output":"/absolute/path/scalp-artifact.json"}'
 
-# 4. 用完全相同的数据、Artifact 和显式 fee 生成 Freqtrade 证据与 walk-forward report
+# 4. 对三个单标的 bundle 分别生成完整 Freqtrade 证据与 member report
 cd skills/helix-freqtrade
 node scripts/ft-deploy.mjs backtest '{"signal_artifact":"/absolute/path/scalp-artifact.json","market_dataset":"/absolute/path/source-dataset.json","fee":0.0005}'
 node scripts/ft-deploy.mjs walk_forward '{"walk_forward_run":"/absolute/path/scalp-walk-forward/walk-forward-run.json","source_dataset":"/absolute/path/source-dataset.json"}'
+
+# 5. 由 Core 固定三个 child plan/run 的组合身份；members 输入顺序不影响最终 hash
+cd /absolute/path/to/helix
+pnpm strategy:walk-forward -- portfolio-plan '{"strategyId":"helix_scalp_hunter","members":[{"run":"/absolute/path/btc/walk-forward-run.json"},{"run":"/absolute/path/eth/walk-forward-run.json"},{"run":"/absolute/path/xrp/walk-forward-run.json"}],"outputDirectory":"/absolute/path/portfolio"}'
+
+# 6. 归档并复验三个 member report，生成最终 Candidate report
+cd skills/helix-freqtrade
+node scripts/ft-deploy.mjs walk_forward_portfolio '{"portfolio_plan":"/absolute/path/portfolio/walk-forward-portfolio-plan.json","reports":["/absolute/path/btc/walk-forward-report-sha256-....json","/absolute/path/eth/walk-forward-report-sha256-....json","/absolute/path/xrp/walk-forward-report-sha256-....json"],"output_directory":"/absolute/path/portfolio"}'
 node scripts/ft-deploy.mjs backtest_results
 
-# 5. 仅当 report gate 通过且 Artifact lifecycle 已为 shadow 或更高时部署 dry-run
-node scripts/ft-deploy.mjs deploy '{"signal_artifact_hash":"sha256:...","walk_forward_report":"/absolute/path/scalp-walk-forward/walk-forward-report-sha256-....json","dry_run":true}'
+# 7. 仅当组合 report gate 通过且 Artifact lifecycle 已为 shadow 或更高时部署 dry-run
+node scripts/ft-deploy.mjs deploy '{"signal_artifact_hash":"sha256:...","walk_forward_report":"/absolute/path/portfolio/walk-forward-portfolio-report-sha256-....json","dry_run":true}'
 ```
 
-Lifecycle 或任一仓库 commit 改变后，旧 Artifact 与 report 都不能沿用。晋级到 `shadow` 后必须在新的 clean commits 上重跑上述链路。
+Policy v2 的单标的 report 会固定失败 `SYMBOL_STABILITY_GATE_SATISFIED`，只能作为组合报告成员，不能单独部署。Lifecycle 或任一仓库 commit 改变后，旧 Artifact 与 report 都不能沿用。晋级到 `shadow` 后必须在新的 clean commits 上重跑上述链路。
 
 ## 环境配置
 

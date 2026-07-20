@@ -114,9 +114,12 @@ function parseWalkForwardPolicy(
   manifest: StrategyManifestIdentity,
 ): StrategyWalkForwardPolicy {
   const root = exactRecord(yaml.load(content), policyPath, ['schema_version', 'policy', 'strategy', 'plan', 'gates'])
-  if (text(root.schema_version, `${policyPath}.schema_version`) !== 'helix.walk-forward-policy/v1') {
+  const schemaVersion = text(root.schema_version, `${policyPath}.schema_version`)
+  if (schemaVersion !== 'helix.walk-forward-policy/v1'
+    && schemaVersion !== 'helix.walk-forward-policy/v2') {
     throw new Error(`${policyPath} uses an unsupported walk-forward policy schema`)
   }
+  const hasSymbolStability = schemaVersion === 'helix.walk-forward-policy/v2'
   const policy = exactRecord(root.policy, `${policyPath}.policy`, ['id', 'version'])
   const id = text(policy.id, `${policyPath}.policy.id`)
   const version = text(policy.version, `${policyPath}.policy.version`)
@@ -168,6 +171,7 @@ function parseWalkForwardPolicy(
     'minimum_profit_factor',
     'maximum_drawdown_r',
     'segment_stability',
+    ...(hasSymbolStability ? ['symbol_stability'] : []),
   ])
   if (gates.censored_entries !== 'reject') {
     throw new Error(`${policyPath}.gates.censored_entries must be reject`)
@@ -186,8 +190,56 @@ function parseWalkForwardPolicy(
       throw new Error(`${policyPath}.gates.segment_stability.dimensions contains invalid dimension ${dimension}`)
     }
   }
+  let symbolStability: StrategyWalkForwardPolicy['gates']['symbolStability']
+  if (hasSymbolStability) {
+    const symbolGate = exactRecord(
+      gates.symbol_stability,
+      `${policyPath}.gates.symbol_stability`,
+      ['members', 'minimum_stable_symbol_ratio'],
+    )
+    if (!Array.isArray(symbolGate.members) || symbolGate.members.length < 2) {
+      throw new Error(`${policyPath}.gates.symbol_stability.members must contain at least two symbols`)
+    }
+    const members = symbolGate.members.map((value, index) => {
+      const name = `${policyPath}.gates.symbol_stability.members[${index}]`
+      const member = exactRecord(value, name, ['provider', 'market', 'instrument_id', 'symbol'])
+      return {
+        provider: text(member.provider, `${name}.provider`),
+        market: text(member.market, `${name}.market`),
+        instrumentId: text(member.instrument_id, `${name}.instrument_id`),
+        symbol: text(member.symbol, `${name}.symbol`),
+      }
+    })
+    if (new Set(members.map(({ symbol }) => symbol)).size !== members.length) {
+      throw new Error(`${policyPath}.gates.symbol_stability.members contains duplicate symbols`)
+    }
+    if (new Set(members.map(({ instrumentId }) => instrumentId)).size !== members.length) {
+      throw new Error(`${policyPath}.gates.symbol_stability.members contains duplicate instrument ids`)
+    }
+    const orderedMembers = [...members].sort((left, right) => (
+      left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1
+        : left.instrumentId < right.instrumentId ? -1 : left.instrumentId > right.instrumentId ? 1 : 0
+    ))
+    if (members.some((member, index) => (
+      member.symbol !== orderedMembers[index]?.symbol
+      || member.instrumentId !== orderedMembers[index]?.instrumentId
+    ))) {
+      throw new Error(
+        `${policyPath}.gates.symbol_stability.members must be ordered by symbol and instrument_id`,
+      )
+    }
+    symbolStability = {
+      members,
+      minimumStableSymbolRatio: finite(
+        symbolGate.minimum_stable_symbol_ratio,
+        `${policyPath}.gates.symbol_stability.minimum_stable_symbol_ratio`,
+        0,
+        1,
+      ),
+    }
+  }
   return {
-    schemaVersion: 'helix.walk-forward-policy/v1',
+    schemaVersion,
     id,
     version,
     strategyId,
@@ -242,6 +294,7 @@ function parseWalkForwardPolicy(
           1,
         ),
       },
+      ...(symbolStability ? { symbolStability } : {}),
     },
   }
 }

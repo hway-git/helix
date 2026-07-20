@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { backtestFeeObservations, backtestMetrics } from '../../lib/backtest-metrics.mjs';
 import { reconcileSignalBacktest } from '../../lib/backtest-reconciliation.mjs';
 import {
@@ -22,12 +23,12 @@ function sha256(content) {
   return `sha256:${createHash('sha256').update(content).digest('hex')}`;
 }
 
-function dataset(candles, capturedThrough) {
+function dataset(candles, capturedThrough, source = {
+  provider: 'okx', market: 'futures', instrumentId: 'BTC-USDT-SWAP', symbol: 'BTC/USDT:USDT',
+}) {
   const payload = {
     schemaVersion: 'helix.market-dataset/v1',
-    source: {
-      provider: 'okx', market: 'swap', instrumentId: 'BTC-USDT-SWAP', symbol: 'BTC/USDT:USDT',
-    },
+    source,
     capturedThrough,
     timeframes: { '1m': candles },
   };
@@ -64,9 +65,11 @@ function riskTrace(artifact, entries) {
   return { ...payload, traceHash: historicalRiskTraceHash(payload) };
 }
 
-function resultFixture(fold, scenario, stressed) {
+function resultFixture(fold, scenario, stressed, options = {}) {
   const tradeCount = fold.run.tradeIds.length;
-  const profitRatio = stressed ? -0.002 : 0.01;
+  const profitRatio = stressed
+    ? options.stressedProfitRatio ?? -0.002
+    : options.baseProfitRatio ?? 0.01;
   const [entry, exit] = fold.executionArtifact.signals;
   const candles = fold.dataset.timeframes['1m'];
   const risk = fold.executionRiskTrace.entries[0];
@@ -127,7 +130,7 @@ function executionConfig() {
   };
 }
 
-export async function createPromotableWalkForwardReport(root, artifact) {
+export async function createPromotableWalkForwardReport(root, artifact, options = {}) {
   const minute = 60_000;
   const candles = Array.from({ length: 8 }, (_, index) => ({
     time: index * minute,
@@ -137,8 +140,11 @@ export async function createPromotableWalkForwardReport(root, artifact) {
     close: 101 + index,
     volume: 10 + index,
   }));
-  const source = dataset(candles, 8 * minute);
-  const foldDatasets = [dataset(candles.slice(0, 6), 6 * minute), source];
+  const sourceIdentity = options.source || {
+    provider: 'okx', market: 'futures', instrumentId: 'BTC-USDT-SWAP', symbol: 'BTC/USDT:USDT',
+  };
+  const source = dataset(candles, 8 * minute, sourceIdentity);
+  const foldDatasets = [dataset(candles.slice(0, 6), 6 * minute, sourceIdentity), source];
   const candidate = {
     strategyId: artifact.identity.strategyId,
     strategyVersion: artifact.identity.strategyVersion,
@@ -154,9 +160,11 @@ export async function createPromotableWalkForwardReport(root, artifact) {
     mode: 'fixed_candidate',
     candidate,
     walkForwardPolicy: {
-      schemaVersion: 'helix.walk-forward-policy/v1',
+      schemaVersion: options.symbolStabilityMembers
+        ? 'helix.walk-forward-policy/v2'
+        : 'helix.walk-forward-policy/v1',
       id: 'scalp_walk_forward_v1',
-      version: '1.0.0',
+      version: options.symbolStabilityMembers ? '2.0.0' : '1.0.0',
       strategyId: candidate.strategyId,
       strategyVersion: candidate.strategyVersion,
       policyPath: 'strategies/scalp/validation/walk-forward-policy.yaml',
@@ -180,6 +188,12 @@ export async function createPromotableWalkForwardReport(root, artifact) {
         segmentStability: {
           dimensions: ['scalp.event_type'], minimumTradesPerSegment: 1, minimumStableSegmentRatio: 1 / 3,
         },
+        ...(options.symbolStabilityMembers ? {
+          symbolStability: {
+            members: options.symbolStabilityMembers,
+            minimumStableSymbolRatio: options.minimumStableSymbolRatio ?? 1,
+          },
+        } : {}),
       },
     },
     sourceDataset: {
@@ -263,7 +277,7 @@ export async function createPromotableWalkForwardReport(root, artifact) {
   for (const fold of bundle.folds) {
     const scenarioEvidence = [];
     for (const [scenarioIndex, scenario] of bundle.plan.executionScenarios.entries()) {
-      const fixture = resultFixture(fold, scenario, scenarioIndex > 0);
+      const fixture = resultFixture(fold, scenario, scenarioIndex > 0, options);
       const resultHash = sha256(fixture.resultContent);
       const resultMetaHash = sha256(fixture.resultMetaContent);
       const executionProfile = signalExecutionProfile(config, {
@@ -325,8 +339,18 @@ export async function createPromotableWalkForwardReport(root, artifact) {
     files,
   };
   const report = createWalkForwardReport(bundle, evidence, coreEvidence);
-  if (!report.gate.ok) throw new Error('test fixture walk-forward report is not promotable');
+  if (options.symbolStabilityMembers) {
+    const failed = report.gate.checks.filter(({ ok }) => !ok).map(({ code }) => code);
+    const expectedStable = options.expectStable !== false;
+    if ((expectedStable && !isDeepStrictEqual(failed, ['SYMBOL_STABILITY_GATE_SATISFIED']))
+      || (!expectedStable && (
+        !failed.includes('SYMBOL_STABILITY_GATE_SATISFIED')
+        || failed.every((code) => code === 'SYMBOL_STABILITY_GATE_SATISFIED')
+      ))) {
+      throw new Error(`test fixture V2 member report has unexpected failed gates: ${failed.join(', ')}`);
+    }
+  } else if (!report.gate.ok) throw new Error('test fixture walk-forward report is not promotable');
   const reportFile = join(root, `walk-forward-report-${report.reportHash.replace(':', '-')}.json`);
   await writeFile(reportFile, `${JSON.stringify(report, null, 2)}\n`);
-  return { report, reportFile };
+  return { report, reportFile, bundle };
 }
