@@ -474,7 +474,7 @@ test('reports missing Expected Move decisions without creating a Thesis', () => 
   assert.equal(evaluator.statistics().createdTheses, 0)
 })
 
-test('deduplicates evaluated entry gate reasons by Thesis and counts pre-entry expiry', () => {
+test('keeps one closest entry-gate frontier evaluation per Thesis and stage', () => {
   const evaluator = new SwingHistoricalEvaluator(config)
   const candidate = createSwingTradeThesis({
     id: 'BTC-THESIS-GATED',
@@ -524,14 +524,26 @@ test('deduplicates evaluated entry gate reasons by Thesis and counts pre-entry e
   })
   evaluator.evaluate(decision(15 * fifteenMinutes))
   evaluator.evaluate(decision(16 * fifteenMinutes))
-  assert.equal(evaluator.statistics().entryGateRejectionsByReason.RR_TOO_LOW, 1)
-  assert.equal(evaluator.statistics().entryGateRejectionsByStageAndReason.EARLY.RR_TOO_LOW, 1)
-  assert.deepEqual(evaluator.statistics().entryGateRejectionsByStageAndReason.STANDARD, {})
-  assert.deepEqual(evaluator.statistics().entryGateRejectionsByStageAndReason.CONFIRMED, {})
-  assert.deepEqual(evaluator.statistics().entryGateRejectionClustersByStage.EARLY, [{
-    reasonCodes: ['ENTRY_TOO_LATE', 'EVIDENCE_INSUFFICIENT', 'LOCATION_MISSING', 'RR_TOO_LOW'],
-    theses: 1,
+  assert.deepEqual(evaluator.statistics().entryGateFrontier.evaluations, [{
+    thesisId: 'BTC-THESIS-GATED',
+    stage: 'EARLY',
+    decisionTime: 15 * fifteenMinutes,
+    outcome: 'REJECTED',
+    firstFailedGate: {
+      gateId: 'LOCATION_ALIGNED',
+      gateOrder: 2,
+      reasonCode: 'LOCATION_MISSING',
+      comparison: 'GTE',
+      actual: 0,
+      required: 1,
+      distanceToPass: 1,
+    },
   }])
+  assert.deepEqual(evaluator.statistics().firstFailuresByStageAndGate, {
+    EARLY: { LOCATION_ALIGNED: 1 },
+    STANDARD: {},
+    CONFIRMED: {},
+  })
 
   const expiringEvaluator = new SwingHistoricalEvaluator(config)
   const expiringCandidate = createSwingTradeThesis({
@@ -550,7 +562,7 @@ test('deduplicates evaluated entry gate reasons by Thesis and counts pre-entry e
   assert.equal(expiringEvaluator.statistics().expiredBeforeFirstEntry, 1)
 })
 
-test('records LOCATION_MISSING only for an entry-eligible Thesis', () => {
+test('records a location frontier failure only for an entry-eligible Thesis', () => {
   const evaluator = new SwingHistoricalEvaluator(config)
   const candidate = createSwingTradeThesis({
     id: 'BTC-THESIS-LOCATION-GATE',
@@ -591,11 +603,222 @@ test('records LOCATION_MISSING only for an entry-eligible Thesis', () => {
     { toState: 'CLOSED', occurredAt: 3 * fifteenMinutes, reasonCodes: ['THESIS_CLOSED'] },
   ).thesis
   evaluate()
-  assert.equal(evaluator.statistics().entryGateRejectionsByReason.LOCATION_MISSING, undefined)
+  assert.deepEqual(evaluator.statistics().entryGateFrontier.evaluations, [])
 
   internal.thesis = eligible
   evaluate()
-  assert.equal(evaluator.statistics().entryGateRejectionsByReason.LOCATION_MISSING, 1)
+  assert.equal(
+    evaluator.statistics().entryGateFrontier.evaluations[0]?.firstFailedGate?.gateId,
+    'LOCATION_ALIGNED',
+  )
+})
+
+test('entry-gate frontier advances by gate order, then distance, and PASSED outcome', () => {
+  const evaluator = new SwingHistoricalEvaluator(config)
+  const internal = evaluator as unknown as {
+    recordEntryGateEvaluation(
+      thesisId: string,
+      stage: 'EARLY' | 'STANDARD' | 'CONFIRMED',
+      decisionTime: number,
+      firstFailedGate: null | {
+        gateId: string
+        gateOrder: number
+        reasonCode: string
+        comparison: 'GTE' | 'LTE' | 'LT'
+        actual: number
+        required: number
+        distanceToPass: number
+      },
+    ): void
+  }
+  internal.recordEntryGateEvaluation('THESIS-1', 'EARLY', 10, {
+    gateId: 'LOCATION_ALIGNED', gateOrder: 2, reasonCode: 'LOCATION_MISSING',
+    comparison: 'GTE', actual: 0, required: 1, distanceToPass: 1,
+  })
+  internal.recordEntryGateEvaluation('THESIS-1', 'EARLY', 20, {
+    gateId: 'ENTRY_DISTANCE_ATR', gateOrder: 8, reasonCode: 'ENTRY_TOO_LATE',
+    comparison: 'LTE', actual: 2.5, required: 2, distanceToPass: 0.5,
+  })
+  internal.recordEntryGateEvaluation('THESIS-1', 'EARLY', 30, {
+    gateId: 'ENTRY_DISTANCE_ATR', gateOrder: 8, reasonCode: 'ENTRY_TOO_LATE',
+    comparison: 'LTE', actual: 2.2, required: 2, distanceToPass: 0.2,
+  })
+  internal.recordEntryGateEvaluation('THESIS-1', 'EARLY', 40, {
+    gateId: 'ENTRY_DISTANCE_ATR', gateOrder: 8, reasonCode: 'ENTRY_TOO_LATE',
+    comparison: 'LTE', actual: 2.4, required: 2, distanceToPass: 0.4,
+  })
+  const rejectedCheckpoint = evaluator.checkpoint()
+  assert.equal(rejectedCheckpoint.entryGateFrontier.evaluations.length, 1)
+  assert.equal(rejectedCheckpoint.entryGateFrontier.evaluations[0]?.decisionTime, 30)
+  assert.equal(rejectedCheckpoint.entryGateFrontier.evaluations[0]?.firstFailedGate?.distanceToPass, 0.2)
+  assert.deepEqual(new SwingHistoricalEvaluator(config, undefined, rejectedCheckpoint).checkpoint(), rejectedCheckpoint)
+
+  internal.recordEntryGateEvaluation('THESIS-1', 'EARLY', 50, null)
+  internal.recordEntryGateEvaluation('THESIS-1', 'EARLY', 60, {
+    gateId: 'REWARD_RISK', gateOrder: 9, reasonCode: 'RR_TOO_LOW',
+    comparison: 'GTE', actual: 1, required: 1.5, distanceToPass: 0.5,
+  })
+  internal.recordEntryGateEvaluation('THESIS-1', 'EARLY', 55, null)
+  const passed = evaluator.checkpoint()
+  assert.deepEqual(passed.entryGateFrontier.evaluations, [{
+    thesisId: 'THESIS-1', stage: 'EARLY', decisionTime: 50, outcome: 'PASSED', firstFailedGate: null,
+  }])
+  assert.deepEqual(evaluator.statistics().firstFailuresByStageAndGate.EARLY, {})
+
+  const forgedDistance = {
+    ...structuredClone(rejectedCheckpoint),
+    entryGateFrontier: {
+      ...structuredClone(rejectedCheckpoint.entryGateFrontier),
+      evaluations: rejectedCheckpoint.entryGateFrontier.evaluations.map((evaluation, index) => (
+        index === 0
+          ? {
+              ...structuredClone(evaluation),
+              firstFailedGate: {
+                ...structuredClone(evaluation.firstFailedGate!),
+                distanceToPass: 0.3,
+              },
+            }
+          : structuredClone(evaluation)
+      )),
+    },
+  }
+  assert.throws(
+    () => new SwingHistoricalEvaluator(config, undefined, forgedDistance),
+    /distanceToPass is invalid/,
+  )
+  const duplicated = {
+    ...structuredClone(rejectedCheckpoint),
+    entryGateFrontier: {
+      ...structuredClone(rejectedCheckpoint.entryGateFrontier),
+      evaluations: [
+        ...structuredClone(rejectedCheckpoint.entryGateFrontier.evaluations),
+        structuredClone(rejectedCheckpoint.entryGateFrontier.evaluations[0]!),
+      ],
+    },
+  }
+  assert.throws(
+    () => new SwingHistoricalEvaluator(config, undefined, duplicated),
+    /uniquely sorted/,
+  )
+  assert.throws(
+    () => new SwingHistoricalEvaluator(config, undefined, {
+      ...rejectedCheckpoint,
+      schemaVersion: 'helix.swing-evaluator-checkpoint/v3',
+    } as never),
+    /unsupported Swing evaluator checkpoint/,
+  )
+})
+
+test('entry-gate frontier restores continuously and rejects impossible or unordered records', () => {
+  const evaluator = new SwingHistoricalEvaluator(config)
+  const internal = evaluator as unknown as {
+    recordEntryGateEvaluation(
+      thesisId: string,
+      stage: 'EARLY' | 'STANDARD' | 'CONFIRMED',
+      decisionTime: number,
+      firstFailedGate: null | {
+        gateId: string
+        gateOrder: number
+        reasonCode: string
+        comparison: 'GTE' | 'LTE' | 'LT'
+        actual: number
+        required: number
+        distanceToPass: number
+      },
+    ): void
+  }
+  const locationFailure = {
+    gateId: 'LOCATION_ALIGNED', gateOrder: 2, reasonCode: 'LOCATION_MISSING',
+    comparison: 'GTE' as const, actual: 0, required: 1, distanceToPass: 1,
+  }
+  internal.recordEntryGateEvaluation('a-thesis', 'EARLY', 10, locationFailure)
+  internal.recordEntryGateEvaluation('B-thesis', 'EARLY', 20, locationFailure)
+  internal.recordEntryGateEvaluation('z-thesis', 'STANDARD', 30, {
+    gateId: 'STRUCTURE_CONFIRMED', gateOrder: 4, reasonCode: 'STRUCTURE_NOT_CONFIRMED',
+    comparison: 'GTE', actual: 0, required: 1, distanceToPass: 1,
+  })
+  const checkpoint = evaluator.checkpoint()
+  assert.deepEqual(
+    checkpoint.entryGateFrontier.evaluations.map(({ stage, thesisId }) => `${stage}:${thesisId}`),
+    ['EARLY:B-thesis', 'EARLY:a-thesis', 'STANDARD:z-thesis'],
+  )
+  assert.deepEqual(new SwingHistoricalEvaluator(config, undefined, checkpoint).checkpoint(), checkpoint)
+
+  const resumed = new SwingHistoricalEvaluator(config, undefined, checkpoint)
+  const resumedInternal = resumed as unknown as typeof internal
+  const laterFailure = {
+    gateId: 'REWARD_RISK', gateOrder: 9, reasonCode: 'RR_TOO_LOW',
+    comparison: 'GTE' as const, actual: 0.9, required: 1, distanceToPass: 0.1,
+  }
+  internal.recordEntryGateEvaluation('B-thesis', 'EARLY', 40, laterFailure)
+  resumedInternal.recordEntryGateEvaluation('B-thesis', 'EARLY', 40, laterFailure)
+  assert.deepEqual(resumed.checkpoint(), evaluator.checkpoint())
+
+  const withEvaluations = (evaluations: unknown[]) => ({
+    ...structuredClone(checkpoint),
+    entryGateFrontier: {
+      ...structuredClone(checkpoint.entryGateFrontier),
+      evaluations,
+    },
+  })
+  assert.throws(
+    () => new SwingHistoricalEvaluator(config, undefined, withEvaluations([
+      checkpoint.entryGateFrontier.evaluations[1],
+      checkpoint.entryGateFrontier.evaluations[0],
+      checkpoint.entryGateFrontier.evaluations[2],
+    ]) as never),
+    /uniquely sorted/,
+  )
+  assert.throws(
+    () => new SwingHistoricalEvaluator(config, undefined, withEvaluations([
+      { ...checkpoint.entryGateFrontier.evaluations[0], stage: 'INVALID' },
+    ]) as never),
+    /stage is invalid/,
+  )
+  assert.throws(
+    () => new SwingHistoricalEvaluator(config, undefined, withEvaluations([{
+      ...checkpoint.entryGateFrontier.evaluations[0],
+      firstFailedGate: {
+        ...checkpoint.entryGateFrontier.evaluations[0]!.firstFailedGate!,
+        gateId: 'UNKNOWN_GATE',
+      },
+    }]) as never),
+    /firstFailedGate is not valid/,
+  )
+  assert.throws(
+    () => new SwingHistoricalEvaluator(config, undefined, withEvaluations([{
+      ...checkpoint.entryGateFrontier.evaluations[0],
+      firstFailedGate: {
+        ...checkpoint.entryGateFrontier.evaluations[0]!.firstFailedGate!,
+        actual: 0.5,
+        distanceToPass: 0.5,
+      },
+    }]) as never),
+    /actual must be 0 for a failed boolean gate/,
+  )
+  assert.throws(
+    () => new SwingHistoricalEvaluator(config, undefined, withEvaluations([{
+      ...checkpoint.entryGateFrontier.evaluations[0],
+      firstFailedGate: {
+        gateId: 'ATTEMPTS_REMAINING', gateOrder: 1, reasonCode: 'MAX_THESIS_ATTEMPTS',
+        comparison: 'LT', actual: 3.5, required: 3, distanceToPass: 1.5,
+      },
+    }]) as never),
+    /actual must be a safe integer for ATTEMPTS_REMAINING/,
+  )
+  assert.throws(
+    () => new SwingHistoricalEvaluator({
+      ...config,
+      risk: { ...config.risk, riskUnitRatio: undefined },
+    }, undefined, withEvaluations([{
+      ...checkpoint.entryGateFrontier.evaluations[0],
+      firstFailedGate: {
+        gateId: 'LEVERAGE_LIMIT', gateOrder: 10, reasonCode: 'LEVERAGE_TOO_HIGH',
+        comparison: 'LTE', actual: 60, required: 50, distanceToPass: 10,
+      },
+    }]) as never),
+    /impossible without config.risk.riskUnitRatio/,
+  )
 })
 
 test('freezes creation-time Context through ENTER and clears it when the Thesis closes', () => {
