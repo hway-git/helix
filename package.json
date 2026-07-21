@@ -38,7 +38,7 @@
     "typecheck": "pnpm --filter @helix/contracts typecheck && pnpm --filter @helix/core typecheck && pnpm --filter @helix/daemon typecheck && pnpm --filter @helix/dashboard typecheck",
     "validate": "node scripts/validate-skills.mjs",
     "freqtrade:install": "node docker/freqtrade/install.mjs",
-    "test:freqtrade": "node --test skills/helix-freqtrade/tests/*.test.mjs",
+    "test:freqtrade": "node --test --test-concurrency=1 skills/helix-freqtrade/tests/*.test.mjs",
     "strategy:history": "pnpm --filter @helix/core strategy:history",
     "strategy:backtest": "pnpm --filter @helix/core strategy:backtest",
     "strategy:walk-forward": "pnpm --filter @helix/core strategy:walk-forward",
